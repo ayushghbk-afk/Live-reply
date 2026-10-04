@@ -1,16 +1,12 @@
 package com.liveaireply.app.accessibility
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.GestureDescription
-import android.graphics.Path
-import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import com.liveaireply.app.adapters.AdapterOverrides
 import com.liveaireply.app.adapters.ChatAdapter
 import com.liveaireply.app.adapters.ComposerCandidate
-import com.liveaireply.app.adapters.PointView
 import com.liveaireply.app.adapters.SendTarget
 import com.liveaireply.app.adapters.SendTargetKind
 import com.liveaireply.app.automation.AutomationController
@@ -22,9 +18,9 @@ import com.liveaireply.app.conversation.flatten
 /**
  * Types into and sends from the chat that is currently on screen.
  *
- * Every action prefers an accessibility node action over a coordinate. A gesture tap is
- * only ever performed when the user configured an explicit point for that app, and the
- * engine refuses AUTO mode unless that point came with high confidence.
+ * Every action uses a specific accessibility node. Coordinate gestures are deliberately
+ * disabled, so the service does not request canPerformGestures and never guesses where to
+ * tap. If a labelled/clickable Send node cannot be found, the reply remains a suggestion.
  */
 class AccessibilityAutomationController(
     private val service: AccessibilityService,
@@ -122,11 +118,10 @@ class AccessibilityAutomationController(
                 else SendResult.failed("The Send button did not accept the click action")
             }
 
-            SendTargetKind.GESTURE_POINT -> {
-                val point = lastSendTarget.point ?: return SendResult.failed("No configured tap point")
-                return if (tap(point)) SendResult.ok(true)
-                else SendResult.failed("Gesture tap was rejected by the system")
-            }
+            SendTargetKind.GESTURE_POINT ->
+                return SendResult.failed(
+                    "Coordinate gestures are disabled; use a labelled Send control or send manually"
+                )
         }
     }
 
@@ -221,11 +216,4 @@ class AccessibilityAutomationController(
         return pasted
     }
 
-    private fun tap(point: PointView): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
-        val path = Path().apply { moveTo(point.x.toFloat(), point.y.toFloat()) }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, 40L)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return runCatching { service.dispatchGesture(gesture, null, null) }.getOrDefault(false)
-    }
 }

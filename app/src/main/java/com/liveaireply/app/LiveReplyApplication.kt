@@ -22,6 +22,7 @@ class LiveReplyApplication : Application() {
                 val settings = container.settingsRepository.settings.first()
                 container.currentSettings = settings
                 container.eventLog.debugEnabled = settings.debugLogging
+                if (settings.emergencyStopped) AssistantRuntime.requestEmergencyStop()
             }
         }
     }

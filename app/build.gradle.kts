@@ -65,8 +65,6 @@ android {
         versionCode = 2
         versionName = "1.0.1"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
         // No API keys, endpoints or secrets are baked into the build. Everything the
         // assistant needs at runtime is entered by the user and stored encrypted.
         buildConfigField("boolean", "SHIPS_WITH_DEFAULT_API_KEY", "false")
@@ -165,16 +163,13 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.service)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.activity.compose)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-    implementation(libs.androidx.material.icons.core)
-    implementation(libs.androidx.navigation.compose)
 
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
@@ -186,11 +181,4 @@ dependencies {
     implementation(libs.mlkit.text.recognition)
 
     testImplementation(libs.junit)
-    testImplementation(libs.kotlinx.coroutines.test)
-
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    androidTestImplementation(platform(libs.androidx.compose.bom))
-
-    debugImplementation(libs.androidx.ui.tooling)
 }

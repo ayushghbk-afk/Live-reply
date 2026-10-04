@@ -1,11 +1,15 @@
 package com.liveaireply.app
 
+import android.app.Activity
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,8 +19,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -25,8 +31,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,10 +46,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.liveaireply.app.adapters.ChatAdapterRegistry
 import com.liveaireply.app.accessibility.LiveReplyAccessibilityService
-import com.liveaireply.app.engine.AssistantRuntime
+import com.liveaireply.app.ocr.OcrCaptureState
+import com.liveaireply.app.security.CapabilityStatus
 import com.liveaireply.app.personas.Persona
 import com.liveaireply.app.personas.PersonaPresets
 import com.liveaireply.app.settings.AppSettings
@@ -53,17 +61,25 @@ import com.liveaireply.app.settings.ThemeMode
 import com.liveaireply.app.ui.AppViewModel
 import com.liveaireply.app.ui.theme.LiveReplyTheme
 import com.liveaireply.app.personas.ReplyLength
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: AppViewModel by viewModels()
+    private val systemStatusRefresh = MutableStateFlow(0)
+
+    override fun onResume() {
+        super.onResume()
+        systemStatusRefresh.value = systemStatusRefresh.value + 1
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             val settings by viewModel.settings.collectAsState()
+            val statusRefresh by systemStatusRefresh.collectAsState()
             LiveReplyTheme(themeMode = settings.themeMode) {
-                AppRoot(viewModel)
+                AppRoot(viewModel, statusRefresh)
             }
         }
     }
@@ -71,11 +87,16 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppRoot(viewModel: AppViewModel) {
+private fun AppRoot(viewModel: AppViewModel, systemStatusRefresh: Int) {
+    // Reading this value refreshes system-grant statuses after returning from Settings.
+    systemStatusRefresh.hashCode()
     val settings by viewModel.settings.collectAsState()
     val message by viewModel.message.collectAsState()
     val context = LocalContext.current
     var screen by remember { mutableStateOf(if (settings.setupCompleted) "home" else "setup") }
+    LaunchedEffect(settings.setupCompleted) {
+        if (settings.setupCompleted && screen == "setup") screen = "home"
+    }
 
     Scaffold(
         topBar = {
@@ -108,7 +129,8 @@ private fun AppRoot(viewModel: AppViewModel) {
                 "personas" -> PersonasScreen(viewModel)
                 "apps" -> AppsScreen(viewModel, settings)
                 "privacy" -> PrivacyScreen(viewModel, settings)
-                "permissions" -> PermissionsScreen(viewModel)
+                "settings" -> SecuritySettingsScreen(viewModel, settings, onNavigate = { screen = it })
+                "permissions" -> SecuritySettingsScreen(viewModel, settings, onNavigate = { screen = it })
                 "logs" -> LogsScreen(viewModel)
                 "test" -> TestModeScreen(viewModel)
             }
@@ -126,6 +148,7 @@ private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigat
     val overlay by viewModel.overlayState.collectAsState()
     val context = LocalContext.current
     val running = LiveReplyAccessibilityService.isRunning()
+    var showAutoDisclosure by remember { mutableStateOf(false) }
 
     SectionCard(title = "Status") {
         StatusLine("Service", if (running) "Running" else "Not connected")
@@ -140,17 +163,13 @@ private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigat
         SwitchRow(
             label = "Monitoring",
             checked = settings.monitoringEnabled,
-            onChecked = {
-                viewModel.setMonitoring(it)
-                if (it) viewModel.startService() else viewModel.stopService()
-            }
+            onChecked = { viewModel.setMonitoring(it) }
         )
         SwitchRow(
             label = "Auto reply",
-            checked = settings.autoReplyEnabled,
-            onChecked = {
-                if (it) viewModel.update { s -> s.copy(acknowledgedAutomationRisk = true) }
-                viewModel.setAutoReply(it)
+            checked = settings.autoReplyEnabled && settings.mode == AssistantMode.AUTO,
+            onChecked = { enabled ->
+                if (enabled) showAutoDisclosure = true else viewModel.disableAutoReply()
             }
         )
         Text(
@@ -167,9 +186,22 @@ private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigat
                 label = mode.label,
                 description = mode.description,
                 selected = settings.mode == mode,
-                onClick = { viewModel.setMode(mode) }
+                onClick = {
+                    if (mode == AssistantMode.AUTO) showAutoDisclosure = true
+                    else viewModel.setMode(mode)
+                }
             )
         }
+    }
+
+    if (showAutoDisclosure) {
+        AutoModeOptInDialog(
+            onDismiss = { showAutoDisclosure = false },
+            onConfirm = {
+                viewModel.enableAutoModeConfirmed()
+                showAutoDisclosure = false
+            }
+        )
     }
 
     Button(onClick = { viewModel.testConnection() }, modifier = Modifier.fillMaxWidth()) {
@@ -184,8 +216,8 @@ private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigat
         NavRow("Manage personas") { onNavigate("personas") }
         NavRow("AI settings") { onNavigate("ai") }
         NavRow("Supported apps") { onNavigate("apps") }
-        NavRow("Privacy") { onNavigate("privacy") }
-        NavRow("Permissions") { onNavigate("permissions") }
+        NavRow("Security & Settings") { onNavigate("settings") }
+        NavRow("Privacy details") { onNavigate("privacy") }
         NavRow("Logs") { onNavigate("logs") }
         NavRow("Test mode") { onNavigate("test") }
         NavRow("Setup wizard") { onNavigate("setup") }
@@ -196,6 +228,7 @@ private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigat
 private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: () -> Unit) {
     val context = LocalContext.current
     var key by remember { mutableStateOf("") }
+    var showAutoDisclosure by remember { mutableStateOf(false) }
 
     // The disclosure comes first and cannot be skipped: the sensitive capabilities are
     // stated in plain language before any permission is requested, and "Finish setup" stays
@@ -211,31 +244,41 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
         Text(context.getString(R.string.disclosure_foreground), fontSize = 12.sp)
         Text(context.getString(R.string.disclosure_screen_capture), fontSize = 12.sp)
         Text(context.getString(R.string.disclosure_network), fontSize = 12.sp)
-        SwitchRow(
+        ConsentCheckbox(
             label = context.getString(R.string.disclosure_acknowledge),
             checked = settings.acknowledgedCapabilities,
-            onChecked = { viewModel.update { s -> s.copy(acknowledgedCapabilities = it) } }
+            onChecked = viewModel::acknowledgeCapabilities
         )
     }
     SectionCard(title = "2. Welcome") {
-        Text("Live AI Reply reads the chat you have open, drafts a reply with your AI, and " +
-            "shows it in a floating bubble. Nothing is sent unless you allow it.")
+        Text("Live AI Reply reads a chat you selected, drafts a reply with your AI, and " +
+            "shows it in the app or optional floating assistant. Suggest mode is the default; " +
+            "nothing is typed or sent until you act.")
     }
     SectionCard(title = "3. Accessibility permission") {
         Text("Needed to read the conversation and to type the reply. Without it the app cannot see any chat.")
-        OutlinedButton(onClick = { openAccessibilitySettings(context) }) { Text("Open Accessibility settings") }
+        OutlinedButton(
+            onClick = { openAccessibilitySettings(context) },
+            enabled = settings.acknowledgedCapabilities
+        ) { Text("Open Accessibility settings") }
     }
-    SectionCard(title = "4. Screen capture / OCR") {
-        Text("Optional and off by default. Used only when a chat does not expose text through " +
-            "Accessibility: one frame is captured after you approve Android's MediaProjection " +
-            "dialog, recognised on this device, and then discarded. Screenshots are never uploaded.")
+    SectionCard(title = "4. Optional floating assistant") {
+        Text("Off by default. Android's Display over other apps grant and the in-app switch " +
+            "are both required. You can remove the floating UI at any time.", fontSize = 12.sp)
+        OutlinedButton(
+            onClick = { openOverlaySettings(context) },
+            enabled = settings.acknowledgedCapabilities
+        ) { Text("Open overlay permission") }
         SwitchRow(
-            label = "Enable OCR fallback",
-            checked = settings.ocrEnabled,
-            onChecked = { viewModel.update { s -> s.copy(ocrEnabled = it) } }
+            label = "Show floating assistant",
+            checked = settings.overlayEnabled,
+            onChecked = viewModel::setOverlayEnabled
         )
     }
-    SectionCard(title = "5. AI provider") {
+    SectionCard(title = "5. Screen capture / OCR") {
+        OcrControls(viewModel, settings)
+    }
+    SectionCard(title = "6. AI provider") {
         OutlinedTextField(
             value = settings.baseUrl,
             onValueChange = { viewModel.update { s -> s.copy(baseUrl = it) } },
@@ -251,7 +294,7 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
         Button(onClick = { viewModel.saveApiKey(key); key = "" }) { Text("Save key") }
         Button(onClick = { viewModel.testConnection() }) { Text("Test connection") }
     }
-    SectionCard(title = "6. Model") {
+    SectionCard(title = "7. Model") {
         OutlinedTextField(
             value = settings.primaryModel,
             onValueChange = { viewModel.update { s -> s.copy(primaryModel = it) } },
@@ -260,7 +303,7 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
         )
         OutlinedButton(onClick = { viewModel.fetchModels() }) { Text("Fetch models") }
     }
-    SectionCard(title = "7. Persona") {
+    SectionCard(title = "8. Persona") {
         PersonaPresets.ALL.forEach { persona ->
             ChoiceRow(
                 label = persona.label,
@@ -270,22 +313,33 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
             )
         }
     }
-    SectionCard(title = "8. Mode") {
+    SectionCard(title = "9. Mode") {
         AssistantMode.entries.forEach { mode ->
             ChoiceRow(
                 label = mode.label,
                 description = mode.description,
                 selected = settings.mode == mode,
-                onClick = { viewModel.setMode(mode) }
+                onClick = {
+                    if (mode == AssistantMode.AUTO) showAutoDisclosure = true
+                    else viewModel.setMode(mode)
+                }
             )
         }
     }
-    SectionCard(title = "9. Test") {
+    if (showAutoDisclosure) {
+        AutoModeOptInDialog(
+            onDismiss = { showAutoDisclosure = false },
+            onConfirm = {
+                viewModel.enableAutoModeConfirmed()
+                showAutoDisclosure = false
+            }
+        )
+    }
+    SectionCard(title = "10. Finish") {
         Button(onClick = { viewModel.testConnection() }) { Text("Test connection") }
         Button(
             onClick = {
-                viewModel.testConnection()
-                viewModel.update { it.copy(setupCompleted = true) }
+                viewModel.finishSetup()
                 onDone()
             },
             enabled = settings.acknowledgedCapabilities,
@@ -521,8 +575,8 @@ private fun PersonasScreen(viewModel: AppViewModel) {
 @Composable
 private fun AppsScreen(viewModel: AppViewModel, settings: AppSettings) {
     SectionCard(title = "Enabled apps") {
-        ChatAdapterRegistry.KNOWN_APPS.forEach { app ->
-            val enabled = app.packageName.isEmpty() || settings.isPackageEnabled(app.packageName)
+        ChatAdapterRegistry.KNOWN_APPS.filter { it.packageName.isNotBlank() }.forEach { app ->
+            val enabled = settings.isPackageEnabled(app.packageName)
             SwitchRow(
                 label = app.displayName,
                 checked = enabled,
@@ -534,6 +588,30 @@ private fun AppsScreen(viewModel: AppViewModel, settings: AppSettings) {
                 }
             )
         }
+    }
+    SectionCard(title = "Other chat app package names") {
+        val knownPackages = ChatAdapterRegistry.KNOWN_APPS.map { it.packageName }.filter { it.isNotBlank() }.toSet()
+        val additional = settings.enabledPackages.filterNot { it in knownPackages }
+        var additionalText by remember(additional) { mutableStateOf(additional.joinToString(", ")) }
+        Text(
+            "Optional. Add exact package names only for chat apps you want the service to read. " +
+                "Android event delivery is restricted to this enabled list.",
+            fontSize = 12.sp
+        )
+        OutlinedTextField(
+            value = additionalText,
+            onValueChange = { additionalText = it },
+            label = { Text("Additional package names (comma separated)") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Button(onClick = {
+            val requested = additionalText.split(",")
+                .map { it.trim() }
+                .filter { it.matches(Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")) }
+            viewModel.update { current ->
+                current.copy(enabledPackages = current.enabledPackages.filter { it in knownPackages } + requested)
+            }
+        }) { Text("Save additional apps") }
     }
     SectionCard(title = "Excluded apps") {
         OutlinedTextField(
@@ -568,9 +646,10 @@ private fun AppsScreen(viewModel: AppViewModel, settings: AppSettings) {
 @Composable
 private fun PrivacyScreen(viewModel: AppViewModel, settings: AppSettings) {
     SectionCard(title = "What leaves the device") {
-        Text("Only the configured number of recent chat lines and your prompt are sent, to the " +
-            "AI endpoint you configured. Screenshots are never uploaded. Nothing else is " +
-            "transmitted anywhere.", fontSize = 12.sp)
+        Text("The configured number of recent visible chat lines, persona/prompt instructions, " +
+            "model settings and the API request are sent to the AI endpoint you selected. " +
+            "Sensitive values are redacted first. Screenshots are processed only on-device, " +
+            "discarded immediately and never uploaded.", fontSize = 12.sp)
     }
     SectionCard(title = "Sensitive screens") {
         Text("Banking, wallet, authenticator and password screens are skipped automatically. " +
@@ -578,28 +657,18 @@ private fun PrivacyScreen(viewModel: AppViewModel, settings: AppSettings) {
     }
     SectionCard(title = "Logging") {
         SwitchRow(
-            label = "Debug mode (includes message text in the log)",
+            label = "Additional in-memory diagnostic detail",
             checked = settings.debugLogging,
             onChecked = { viewModel.update { s -> s.copy(debugLogging = it) } }
         )
-        SwitchRow(
-            label = "Keep conversation history",
-            checked = settings.storeConversationHistory,
-            onChecked = { viewModel.update { s -> s.copy(storeConversationHistory = it) } }
-        )
-        Text("API keys are never logged. Message text is only logged in debug mode and is " +
-            "redacted for secrets either way.", fontSize = 11.sp)
+        Text("Diagnostics stay in a bounded in-memory buffer, are not uploaded or persisted, " +
+            "and always pass through secret redaction. API keys are never logged.", fontSize = 11.sp)
     }
     SectionCard(title = "Overlay") {
         SwitchRow(
-            label = "Show floating control",
+            label = "Show floating control while monitoring",
             checked = settings.overlayEnabled,
-            onChecked = { viewModel.update { s -> s.copy(overlayEnabled = it) } }
-        )
-        SwitchRow(
-            label = "Appear automatically",
-            checked = settings.overlayAutoShow,
-            onChecked = { viewModel.update { s -> s.copy(overlayAutoShow = it) } }
+            onChecked = viewModel::setOverlayEnabled
         )
         SliderRow("Size", settings.overlayScale, 0.7f, 1.6f) {
             viewModel.update { s -> s.copy(overlayScale = it) }
@@ -620,49 +689,147 @@ private fun PrivacyScreen(viewModel: AppViewModel, settings: AppSettings) {
 }
 
 @Composable
-private fun PermissionsScreen(viewModel: AppViewModel) {
+private fun SecuritySettingsScreen(
+    viewModel: AppViewModel,
+    settings: AppSettings,
+    onNavigate: (String) -> Unit
+) {
     val context = LocalContext.current
-    SectionCard(title = "Permission status") {
-        val accessibility = LiveReplyAccessibilityService.isRunning()
-        StatusLine("Accessibility service", if (accessibility) "Enabled" else "Not enabled")
-        StatusLine("Overlay permission", if (Settings.canDrawOverlays(context)) "Granted" else "Not granted")
+    val ocrState by viewModel.ocrCaptureState.collectAsState()
+    val accessibilityGranted = CapabilityStatus.accessibilityEnabled(context)
+    val overlayGranted = CapabilityStatus.overlayGranted(context)
+
+    SectionCard(title = "Security status") {
+        StatusLine(
+            "Accessibility status",
+            when {
+                !accessibilityGranted -> "Not enabled"
+                LiveReplyAccessibilityService.isRunning() -> "Enabled and connected"
+                else -> "Enabled (service not connected)"
+            }
+        )
+        StatusLine(
+            "Overlay status",
+            when {
+                !overlayGranted -> "System permission not granted"
+                settings.overlayEnabled -> "Granted and enabled by you"
+                else -> "Granted, floating UI off"
+            }
+        )
+        StatusLine(
+            "Screen capture / OCR status",
+            if (!settings.ocrEnabled) "Feature off" else ocrState.label
+        )
+        StatusLine("AI provider", settings.providerId.ifBlank { "Not configured" })
+        Text("API endpoint", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text(settings.baseUrl.ifBlank { "Not configured" }, fontSize = 12.sp)
+    }
+
+    SectionCard(title = "Emergency STOP") {
+        Text(
+            "Stops the foreground assistant, removes the overlay, releases screen capture, " +
+                "clears pending suggestions and prevents further automated replies.",
+            fontSize = 12.sp
+        )
+        SwitchRow(
+            label = if (settings.emergencyStopped) "STOP is active" else "Activate global STOP",
+            checked = settings.emergencyStopped,
+            enabled = !settings.emergencyStopped,
+            onChecked = { enabled -> if (enabled) viewModel.emergencyStop() }
+        )
+        Button(
+            onClick = viewModel::emergencyStop,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("STOP EVERYTHING NOW", fontWeight = FontWeight.Bold) }
+        if (settings.emergencyStopped) {
+            Text(
+                "STOP remains active. To resume, deliberately turn Monitoring on from Home; " +
+                    "Auto reply remains off and needs a new opt-in.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+    }
+
+    SectionCard(title = "Accessibility — core feature") {
+        Text(
+            "Reads visible conversation text only from package names you enable under Supported " +
+                "apps. It identifies the composer and can use ACTION_SET_TEXT / a labelled Send " +
+                "control only in Approve or explicitly opted-in Auto mode. Coordinate gestures " +
+                "and key-event filtering are disabled.",
+            fontSize = 12.sp
+        )
+        OutlinedButton(
+            onClick = { openAccessibilitySettings(context) },
+            enabled = settings.acknowledgedCapabilities
+        ) { Text("Open Accessibility settings") }
+        OutlinedButton(onClick = { onNavigate("apps") }) { Text("Choose supported apps") }
+    }
+
+    SectionCard(title = "Floating assistant — optional") {
+        Text(
+            "The system grant alone does not show anything. The in-app switch below controls " +
+                "whether the overlay exists while monitoring. It is removed immediately by STOP.",
+            fontSize = 12.sp
+        )
+        OutlinedButton(
+            onClick = { openOverlaySettings(context) },
+            enabled = settings.acknowledgedCapabilities
+        ) { Text("Open Display over other apps") }
+        SwitchRow(
+            label = "Show floating assistant",
+            checked = settings.overlayEnabled,
+            onChecked = viewModel::setOverlayEnabled
+        )
+    }
+
+    SectionCard(title = "Screen capture / OCR — optional") {
+        OcrControls(viewModel, settings)
+    }
+
+    SectionCard(title = "AI and data processing") {
+        Text("Provider: ${settings.providerId.ifBlank { "Not configured" }}", fontSize = 12.sp)
+        Text("Endpoint: ${settings.baseUrl.ifBlank { "Not configured" }}", fontSize = 12.sp)
+        Text(
+            "When monitoring detects a new message, recent visible chat text and your reply " +
+                "instructions may be sent to this endpoint. Before transmission, Live AI Reply " +
+                "redacts OTPs, passwords, PINs, card numbers, CVVs, bank-account values and " +
+                "authentication codes. The selected provider may process the remaining text " +
+                "under its own terms. OCR images never leave the device.",
+            fontSize = 12.sp
+        )
+        OutlinedButton(onClick = { onNavigate("ai") }) { Text("Edit AI provider and endpoint") }
+        OutlinedButton(onClick = { onNavigate("privacy") }) { Text("Open privacy details") }
+    }
+
+    SectionCard(title = "Other system controls") {
         StatusLine(
             "Notifications",
-            if (Build.VERSION.SDK_INT < 33 || androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled())
-                "Enabled" else "Not enabled"
+            if (Build.VERSION.SDK_INT < 33 ||
+                androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()
+            ) "Enabled" else "Not enabled"
         )
-        StatusLine("API key", if (viewModel.hasApiKey()) "Configured" else "Missing")
+        if (Build.VERSION.SDK_INT >= 33) {
+            OutlinedButton(
+                onClick = {
+                    ActivityCompat.requestPermissions(
+                        context as Activity,
+                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                        1001
+                    )
+                },
+                enabled = settings.acknowledgedCapabilities
+            ) { Text("Allow monitoring notifications") }
+        }
         StatusLine(
             "Battery optimisation",
-            if (isIgnoringBatteryOptimisations(context)) "Exempt" else "Optimised (may delay events)"
+            if (isIgnoringBatteryOptimisations(context)) "Exempt" else "Optimised"
         )
-    }
-    OutlinedButton(onClick = { openAccessibilitySettings(context) }) { Text("Open Accessibility settings") }
-    OutlinedButton(onClick = {
-        context.startActivity(
-            Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                android.net.Uri.parse("package:${context.packageName}")
-            )
-        )
-    }) { Text("Grant overlay permission") }
-    if (Build.VERSION.SDK_INT >= 33) {
         OutlinedButton(onClick = {
-            ActivityCompat.requestPermissions(
-                context as android.app.Activity,
-                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001
-            )
-        }) { Text("Allow notifications") }
+            runCatching { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        }) { Text("Battery optimisation settings") }
+        Text(text = context.getString(R.string.disclosure_battery), fontSize = 11.sp)
     }
-    // Battery optimisation: this opens the system list, where the user can set the app to
-    // Unrestricted. The app deliberately does NOT request the restricted
-    // REQUEST_IGNORE_BATTERY_OPTIMIZATIONS permission (and therefore cannot show the
-    // one-tap exempt dialog) - that permission is not needed for the feature to work and
-    // Play restricts it to a narrow set of app types.
-    OutlinedButton(onClick = {
-        runCatching { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-    }) { Text("Battery optimisation settings") }
-    Text(text = context.getString(R.string.disclosure_battery), fontSize = 11.sp)
 }
 
 @Composable
@@ -697,6 +864,105 @@ private fun TestModeScreen(viewModel: AppViewModel) {
     }
 }
 
+// ---------------------------------------------------------- consent / safety controls
+
+@Composable
+private fun OcrControls(viewModel: AppViewModel, settings: AppSettings) {
+    val context = LocalContext.current
+    val captureState by viewModel.ocrCaptureState.collectAsState()
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        viewModel.armScreenCapture(result.resultCode, result.data)
+    }
+
+    Text(
+        "Optional and off by default. Accessibility text is always tried first. If it is " +
+            "unavailable, one frame may be captured only after you tap the button below and " +
+            "approve Android's screen-capture dialog. OCR runs on-device; the bitmap is " +
+            "discarded immediately and never uploaded.",
+        fontSize = 12.sp
+    )
+    Text(
+        "Android excludes FLAG_SECURE-protected content. Live AI Reply does not try to bypass " +
+            "that protection. A fresh fallback requires fresh Android confirmation.",
+        fontSize = 11.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    SwitchRow(
+        label = "Enable optional OCR fallback",
+        checked = settings.ocrEnabled,
+        enabled = settings.acknowledgedCapabilities && !settings.emergencyStopped,
+        onChecked = viewModel::setOcrEnabled
+    )
+    StatusLine("One-shot capture", captureState.label)
+    Button(
+        onClick = {
+            val manager = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
+                as MediaProjectionManager
+            launcher.launch(manager.createScreenCaptureIntent())
+        },
+        enabled = settings.acknowledgedCapabilities && settings.ocrEnabled &&
+            !settings.emergencyStopped && captureState == OcrCaptureState.OFF,
+        modifier = Modifier.fillMaxWidth()
+    ) { Text("Authorize one OCR fallback") }
+    if (captureState != OcrCaptureState.OFF) {
+        OutlinedButton(
+            onClick = viewModel::stopScreenCapture,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Stop screen capture now") }
+    }
+}
+
+@Composable
+private fun AutoModeOptInDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    var understood by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Auto mode can send without another tap") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "When Monitoring is on, Auto mode may read visible chat text in the apps " +
+                        "you selected, send a redacted conversation excerpt to your AI endpoint, " +
+                        "insert the generated reply into the identified composer, and activate " +
+                        "that chat's labelled Send control after your configured delay."
+                )
+                Text(
+                    "It does not approve permissions, payments, security prompts or credential " +
+                        "fields. Safety checks can fall back to a suggestion, but generated text " +
+                        "can still be wrong. STOP AI remains available in the app, overlay and " +
+                        "foreground notification."
+                )
+                ConsentCheckbox(
+                    label = "I understand Auto can type and send messages without another tap",
+                    checked = understood,
+                    onChecked = { understood = it }
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm, enabled = understood) { Text("Enable Auto mode") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun ConsentCheckbox(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    androidx.compose.foundation.layout.Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onChecked(!checked) },
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onChecked)
+        Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp)
+    }
+}
+
 // --------------------------------------------------------------------- widgets
 
 @Composable
@@ -722,13 +988,18 @@ private fun StatusLine(label: String, value: String) {
 }
 
 @Composable
-private fun SwitchRow(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+private fun SwitchRow(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onChecked: (Boolean) -> Unit
+) {
     androidx.compose.foundation.layout.Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
     ) {
         Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp)
-        Switch(checked = checked, onCheckedChange = onChecked)
+        Switch(checked = checked, onCheckedChange = onChecked, enabled = enabled)
     }
 }
 
@@ -779,6 +1050,17 @@ private fun PersonaField(label: String, value: String, onChange: (String) -> Uni
 private fun openAccessibilitySettings(context: android.content.Context) {
     runCatching {
         context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    }
+}
+
+private fun openOverlaySettings(context: android.content.Context) {
+    runCatching {
+        context.startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.parse("package:${context.packageName}")
+            )
+        )
     }
 }
 

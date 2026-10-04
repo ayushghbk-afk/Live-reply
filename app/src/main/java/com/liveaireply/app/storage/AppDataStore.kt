@@ -69,7 +69,6 @@ class AppDataStore(private val context: Context) {
         val OCR_REGIONS_JSON = stringPreferencesKey("ocr_regions_json")
 
         val OVERLAY_ENABLED = booleanPreferencesKey("overlay_enabled")
-        val OVERLAY_AUTO_SHOW = booleanPreferencesKey("overlay_auto_show")
         val OVERLAY_SCALE = floatPreferencesKey("overlay_scale")
         val OVERLAY_OPACITY = floatPreferencesKey("overlay_opacity")
         val OVERLAY_X = intPreferencesKey("overlay_x")
@@ -77,7 +76,6 @@ class AppDataStore(private val context: Context) {
         val OVERLAY_EXPANDED = booleanPreferencesKey("overlay_expanded")
 
         val DEBUG_LOGGING = booleanPreferencesKey("debug_logging")
-        val STORE_HISTORY = booleanPreferencesKey("store_history")
         val EXCLUDED_PACKAGES = stringSetPreferencesKey("excluded_packages")
         val PAUSED_CONVERSATIONS = stringSetPreferencesKey("paused_conversations")
         val ENABLED_PACKAGES = stringSetPreferencesKey("enabled_packages")

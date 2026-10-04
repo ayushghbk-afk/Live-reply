@@ -3,6 +3,7 @@ package com.liveaireply.app.overlay
 import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -13,7 +14,6 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import com.liveaireply.app.engine.AssistantRuntime
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /** Lifecycle owner required by ComposeView when it is not inside an Activity. */
@@ -48,7 +48,10 @@ class OverlayController(
     fun attach() {
         if (attached) return
         val settings = AssistantRuntime.container?.currentSettings ?: return
-        if (!settings.overlayEnabled) return
+        if (!settings.acknowledgedCapabilities || !settings.overlayEnabled ||
+            settings.emergencyStopped || AssistantRuntime.emergencyStopRequested ||
+            !Settings.canDrawOverlays(context)
+        ) return
 
         val owner = OverlayLifecycleOwner().also { lifecycleOwner = it }
         val view = ComposeView(context)
@@ -68,7 +71,10 @@ class OverlayController(
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                // Suggestions and visible conversation excerpts in this app's own overlay
+                // must not appear in screenshots or another MediaProjection session.
+                WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -76,17 +82,19 @@ class OverlayController(
             y = settings.overlayPosition.y
         }
         params = layoutParams
-        runCatching { windowManager.addView(view, layoutParams) }
+        val added = runCatching { windowManager.addView(view, layoutParams) }
             .onFailure { AssistantRuntime.publishError("Could not show the overlay", it.message.orEmpty()) }
+            .isSuccess
+        if (!added) {
+            owner.destroy()
+            lifecycleOwner = null
+            params = null
+            return
+        }
         rootView = view
         attached = true
+        AssistantRuntime.overlayPositionUpdater = ::updatePosition
         owner.resume()
-
-        scope.launch {
-            AssistantRuntime.overlayState.collectLatest { state ->
-                view.setContent { OverlayContent() }
-            }
-        }
     }
 
     fun updatePosition(x: Int, y: Int) {
@@ -95,10 +103,12 @@ class OverlayController(
         layoutParams.x = x
         layoutParams.y = y
         runCatching { windowManager.updateViewLayout(view, layoutParams) }
-        kotlinx.coroutines.runBlocking {
-            AssistantRuntime.container?.settingsRepository?.update {
-                it.copy(overlayPosition = com.liveaireply.app.adapters.PointView(x, y))
-            }
+        val container = AssistantRuntime.container ?: return
+        val point = com.liveaireply.app.adapters.PointView(x, y)
+        container.currentSettings = container.currentSettings.copy(overlayPosition = point)
+        scope.launch {
+            val saved = container.settingsRepository.update { it.copy(overlayPosition = point) }
+            container.currentSettings = saved
         }
     }
 
@@ -106,8 +116,10 @@ class OverlayController(
         val view = rootView ?: return
         runCatching { windowManager.removeView(view) }
         lifecycleOwner?.destroy()
+        AssistantRuntime.overlayPositionUpdater = null
         rootView = null
         lifecycleOwner = null
+        params = null
         attached = false
     }
 }

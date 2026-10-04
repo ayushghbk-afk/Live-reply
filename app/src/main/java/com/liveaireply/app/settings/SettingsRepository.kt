@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Maps DataStore preferences onto the immutable [AppSettings] value object.
@@ -30,6 +32,8 @@ class SettingsRepository(
     private val dataStore: AppDataStore,
     private val eventLog: EventLog? = null
 ) {
+
+    private val updateMutex = Mutex()
 
     val settings: Flow<AppSettings> = dataStore.preferences
         .map { prefs ->
@@ -78,8 +82,7 @@ class SettingsRepository(
                 ocrMinConfidence = prefs[AppDataStore.Keys.OCR_MIN_CONFIDENCE] ?: 0.55f,
                 ocrRegions = decodeRegions(prefs[AppDataStore.Keys.OCR_REGIONS_JSON]),
 
-                overlayEnabled = prefs[AppDataStore.Keys.OVERLAY_ENABLED] ?: true,
-                overlayAutoShow = prefs[AppDataStore.Keys.OVERLAY_AUTO_SHOW] ?: true,
+                overlayEnabled = prefs[AppDataStore.Keys.OVERLAY_ENABLED] ?: false,
                 overlayScale = prefs[AppDataStore.Keys.OVERLAY_SCALE] ?: 1f,
                 overlayOpacity = prefs[AppDataStore.Keys.OVERLAY_OPACITY] ?: 0.95f,
                 overlayPosition = PointView(
@@ -89,7 +92,6 @@ class SettingsRepository(
                 overlayExpandedByDefault = prefs[AppDataStore.Keys.OVERLAY_EXPANDED] ?: false,
 
                 debugLogging = prefs[AppDataStore.Keys.DEBUG_LOGGING] ?: false,
-                storeConversationHistory = prefs[AppDataStore.Keys.STORE_HISTORY] ?: false,
                 excludedPackages = prefs[AppDataStore.Keys.EXCLUDED_PACKAGES]?.toList() ?: emptyList(),
                 pausedConversations = prefs[AppDataStore.Keys.PAUSED_CONVERSATIONS]?.toList() ?: emptyList(),
                 enabledPackages = prefs[AppDataStore.Keys.ENABLED_PACKAGES]?.toList()
@@ -97,16 +99,18 @@ class SettingsRepository(
                 adapterOverrides = decodeOverrides(prefs[AppDataStore.Keys.ADAPTER_OVERRIDES_JSON]),
                 themeMode = enumOrDefault(prefs[AppDataStore.Keys.THEME_MODE], ThemeMode.SYSTEM),
                 setupCompleted = prefs[AppDataStore.Keys.SETUP_COMPLETED] ?: false
-            )
+            ).enforceSafetyInvariants()
         }
         .distinctUntilChanged()
 
-    suspend fun update(transform: (AppSettings) -> AppSettings) {
-        // Read-modify-write against the latest stored value.
+    suspend fun update(transform: (AppSettings) -> AppSettings): AppSettings = updateMutex.withLock {
+        // Serialize read-modify-write operations so rapid UI actions cannot overwrite one
+        // another. Safety invariants are applied here so no non-UI caller can bypass them.
         val current = settings.first()
-        val next = transform(current)
+        val next = transform(current).enforceSafetyInvariants()
         write(current, next)
         eventLog?.log("Settings updated", "settings")
+        next
     }
 
     private suspend fun write(previous: AppSettings, next: AppSettings) {
@@ -163,14 +167,12 @@ class SettingsRepository(
                 encodeRegions(next.ocrRegions), encodeRegions(previous.ocrRegions)
             )
             put(AppDataStore.Keys.OVERLAY_ENABLED, next.overlayEnabled, previous.overlayEnabled)
-            put(AppDataStore.Keys.OVERLAY_AUTO_SHOW, next.overlayAutoShow, previous.overlayAutoShow)
             put(AppDataStore.Keys.OVERLAY_SCALE, next.overlayScale, previous.overlayScale)
             put(AppDataStore.Keys.OVERLAY_OPACITY, next.overlayOpacity, previous.overlayOpacity)
             put(AppDataStore.Keys.OVERLAY_X, next.overlayPosition.x, previous.overlayPosition.x)
             put(AppDataStore.Keys.OVERLAY_Y, next.overlayPosition.y, previous.overlayPosition.y)
             put(AppDataStore.Keys.OVERLAY_EXPANDED, next.overlayExpandedByDefault, previous.overlayExpandedByDefault)
             put(AppDataStore.Keys.DEBUG_LOGGING, next.debugLogging, previous.debugLogging)
-            put(AppDataStore.Keys.STORE_HISTORY, next.storeConversationHistory, previous.storeConversationHistory)
             put(
                 AppDataStore.Keys.EXCLUDED_PACKAGES,
                 next.excludedPackages.toSet(), previous.excludedPackages.toSet()

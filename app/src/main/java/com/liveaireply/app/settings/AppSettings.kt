@@ -154,8 +154,8 @@ data class AppSettings(
     val ocrRegions: Map<String, OcrRegion> = emptyMap(),
 
     // --------------------------------------------------------------------- overlay
-    val overlayEnabled: Boolean = true,
-    val overlayAutoShow: Boolean = true,
+    /** Optional floating UI. Off until the user deliberately enables it. */
+    val overlayEnabled: Boolean = false,
     val overlayScale: Float = 1f,
     val overlayOpacity: Float = 0.95f,
     val overlayPosition: PointView = PointView(48, 260),
@@ -163,7 +163,6 @@ data class AppSettings(
 
     // --------------------------------------------------------------------- privacy
     val debugLogging: Boolean = false,
-    val storeConversationHistory: Boolean = false,
     val excludedPackages: List<String> = emptyList(),
     val pausedConversations: List<String> = emptyList(),
     val enabledPackages: List<String> = DEFAULT_ENABLED_PACKAGES,
@@ -220,7 +219,46 @@ data class AppSettings(
      * consults, so the rule cannot drift between screens.
      */
     fun autoSendPermitted(): Boolean =
-        autoReplyEnabled && acknowledgedAutomationRisk && !emergencyStopped && mode == AssistantMode.AUTO
+        acknowledgedCapabilities && monitoringEnabled && autoReplyEnabled &&
+            acknowledgedAutomationRisk && !emergencyStopped && mode == AssistantMode.AUTO
+
+    /**
+     * Enforces privacy invariants at the persistence boundary, not only in the UI.
+     * This protects service/notification call sites and upgrades from older versions.
+     */
+    fun enforceSafetyInvariants(): AppSettings {
+        var safe = this
+        if (!safe.acknowledgedCapabilities) {
+            safe = safe.copy(
+                mode = AssistantMode.SUGGEST,
+                monitoringEnabled = false,
+                autoReplyEnabled = false,
+                acknowledgedAutomationRisk = false,
+                ocrEnabled = false,
+                captureScope = CaptureScope.OFF,
+                overlayEnabled = false
+            )
+        }
+        if (safe.emergencyStopped) {
+            safe = safe.copy(
+                mode = AssistantMode.SUGGEST,
+                monitoringEnabled = false,
+                autoReplyEnabled = false,
+                acknowledgedAutomationRisk = false
+            )
+        }
+        if (safe.mode != AssistantMode.AUTO) {
+            safe = safe.copy(autoReplyEnabled = false, acknowledgedAutomationRisk = false)
+        }
+        safe = if (!safe.ocrEnabled) {
+            safe.copy(captureScope = CaptureScope.OFF)
+        } else {
+            // OCR is deliberately limited to the saved conversation crop. Older builds
+            // exposed a full-screen value; normalize it away during migration.
+            safe.copy(captureScope = CaptureScope.CONVERSATION_AREA)
+        }
+        return safe
+    }
 
     companion object {
         // NOTE: these two must be declared before DEFAULT. A companion object is

@@ -31,6 +31,7 @@ class EngineHostAndroid(
     }
 
     override fun onEngineStopped() {
+        EmergencyStopController.finishStop(context)
         onStop()
     }
 

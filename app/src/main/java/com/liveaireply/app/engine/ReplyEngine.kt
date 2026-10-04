@@ -105,6 +105,11 @@ class ReplyEngine(
 
     @Synchronized
     fun start(settings: AppSettings = settingsProvider()): EngineResult {
+        if (!settings.acknowledgedCapabilities || settings.emergencyStopped || !settings.monitoringEnabled) {
+            running = false
+            inFlight = false
+            return EngineResult.Nothing("Disclosure not accepted, monitoring is off, or STOP is active")
+        }
         running = true
         inFlight = false
         detector.resetAll()
@@ -296,7 +301,11 @@ class ReplyEngine(
         }
 
         inFlight = false
-        if (cancellation.isCancelled()) return EngineResult.Nothing("Cancelled")
+        // STOP may have been pressed while the network call was in flight. Never publish,
+        // insert or send its result after the engine has crossed the stop boundary.
+        if (cancellation.isCancelled() || !running || settingsProvider().emergencyStopped) {
+            return EngineResult.Nothing("Stopped before the AI request completed")
+        }
 
         return when (result) {
             is ReplyGenerationResult.Invalid -> {
@@ -348,7 +357,10 @@ class ReplyEngine(
         settings: AppSettings
     ): EngineResult {
         val sendBlockedReason = incoming.autoSendBlockedReason
-        val mode = settings.mode
+        // Generation can take several seconds. Re-read settings so disabling Auto while
+        // the request is in flight takes effect before any automation decision.
+        var activeSettings = settingsProvider()
+        val mode = activeSettings.mode
 
         pendingSuggestion = PendingSuggestion(
             replyText = reply,
@@ -360,7 +372,7 @@ class ReplyEngine(
         )
 
         if (mode != AssistantMode.AUTO || !incoming.autoSendAllowed) {
-            showSuggestion(settings, model, latencyMs, incoming.turn.text, sendBlockedReason)
+            showSuggestion(activeSettings, model, latencyMs, incoming.turn.text, sendBlockedReason)
             return EngineResult.Suggested(reply, incoming.conversationId, incoming.turn.text, sendBlockedReason)
         }
 
@@ -368,32 +380,34 @@ class ReplyEngine(
             reply, incoming.conversationId, incoming.turn.text, "No extraction facts available"
         )
 
-        val decision = evaluateAutomation(settings, reply, facts)
+        val decision = evaluateAutomation(activeSettings, reply, facts)
         if (decision is AutomationDecision.Refuse) {
             log(LogSeverity.WARN, "Auto send refused: ${decision.reason}", "automation")
-            showSuggestion(settings, model, latencyMs, incoming.turn.text, decision.reason)
+            showSuggestion(activeSettings, model, latencyMs, incoming.turn.text, decision.reason)
             return EngineResult.SuggestedInsteadOfAuto(reply, decision.reason)
         }
 
-        val delayMs = settings.effectiveReplyDelayMs()
+        val delayMs = activeSettings.effectiveReplyDelayMs()
         if (delayMs > 0) {
             log(LogSeverity.DEBUG, "Waiting ${delayMs}ms before sending", "automation")
             sleeper.sleep(delayMs)
         }
         if (cancellation.isCancelled() || !running) {
-            showSuggestion(settings, model, latencyMs, incoming.turn.text, "Stopped before sending")
+            showSuggestion(activeSettings, model, latencyMs, incoming.turn.text, "Stopped before sending")
             return EngineResult.SuggestedInsteadOfAuto(reply, "Stopped before sending")
         }
 
         // Re-check immediately before touching the other app: the user may have switched
-        // windows or started typing during the delay.
-        val recheck = evaluateAutomation(settings, reply, facts)
+        // windows, started typing, disabled Auto, or revoked its acknowledgement during
+        // the generation/delay window.
+        activeSettings = settingsProvider()
+        val recheck = evaluateAutomation(activeSettings, reply, facts)
         if (recheck is AutomationDecision.Refuse) {
-            showSuggestion(settings, model, latencyMs, incoming.turn.text, recheck.reason)
+            showSuggestion(activeSettings, model, latencyMs, incoming.turn.text, recheck.reason)
             return EngineResult.SuggestedInsteadOfAuto(reply, recheck.reason)
         }
 
-        return performSend(reply, incoming.conversationId, settings, automatic = true)
+        return performSend(reply, incoming.conversationId, activeSettings, automatic = true)
     }
 
     private fun performSend(
@@ -402,6 +416,9 @@ class ReplyEngine(
         settings: AppSettings,
         automatic: Boolean
     ): EngineResult {
+        if (!running || settingsProvider().emergencyStopped) {
+            return EngineResult.Nothing("AI is stopped")
+        }
         // Register first: even if sending fails halfway, this text must never be
         // treated as a new incoming message later.
         detector.registerSelfReply(reply)

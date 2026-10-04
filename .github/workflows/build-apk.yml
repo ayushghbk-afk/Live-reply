@@ -116,18 +116,28 @@ jobs:
             echo "Set ANDROID_DEBUG_KEYSTORE_BASE64 (or the release signing secrets) to stop that."
           fi
 
-      - name: Run the unit tests and build the APKs
+      - name: Run clean, tests, and both APK builds
         id: build
-        # --continue lets assembleDebug/assembleRelease finish even if a test fails, so
-        # the APKs are always uploaded; the "Fail the job if..." step at the end still
-        # turns a test failure into a red build. `tee` keeps the log for the next step.
+        # Run the four requested commands independently so all are attempted and their
+        # individual status is preserved in the log. The final step still turns any
+        # failure into a red job after reports/artifacts have been uploaded.
         continue-on-error: true
         run: |-
-          set -o pipefail
-          ./gradlew --continue --stacktrace --console=plain \
-            testDebugUnitTest \
-            assembleDebug \
-            assembleRelease 2>&1 | tee gradle-build.log
+          set +e
+          : > gradle-build.log
+          overall=0
+          run_gradle() {
+            echo "===== ./gradlew $* =====" | tee -a gradle-build.log
+            ./gradlew --stacktrace --console=plain "$@" 2>&1 | tee -a gradle-build.log
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then overall=1; fi
+            echo "===== exit $status: ./gradlew $* =====" | tee -a gradle-build.log
+          }
+          run_gradle clean
+          run_gradle test
+          run_gradle assembleDebug
+          run_gradle assembleRelease
+          exit "$overall"
 
       - name: Publish the build errors as annotations
         if: steps.build.outcome == 'failure'
@@ -242,9 +252,9 @@ jobs:
               echo "Install the \`-release.apk\` when one is published (signed, not debuggable);"
               echo "the \`-debug.apk\` is for local testing only."
               echo ""
-              echo "Play Protect blocks internet-sideloaded installs of apps that declare"
-              echo "accessibility access - see README -> \"Google Play Protect\". Use"
-              echo "\`adb install\` for developer installs."
+              echo "Accessibility, overlay and screen capture remain high-risk capabilities;"
+              echo "a valid signature does not guarantee warning-free installation. For public"
+              echo "distribution, use transparent Google Play review; never disable Play Protect."
             else
               echo "No APK was produced - check the build log."
             fi

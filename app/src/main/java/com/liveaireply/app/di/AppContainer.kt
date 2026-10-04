@@ -4,6 +4,7 @@ import android.content.Context
 import com.liveaireply.app.adapters.AdapterOverrides
 import com.liveaireply.app.adapters.ChatAdapterRegistry
 import com.liveaireply.app.ai.AiProvider
+import com.liveaireply.app.ai.PrivacyFilteringAiProvider
 import com.liveaireply.app.ai.ReplyPipeline
 import com.liveaireply.app.ai.ReplyValidator
 import com.liveaireply.app.ai.openai.OkHttpTransport
@@ -67,7 +68,7 @@ class AppContainer(context: Context) {
                 }
             )
         }
-        return if (settings.providerId == "openrouter") {
+        val provider = if (settings.providerId == "openrouter") {
             OpenRouterProvider(transport, configProvider, APP_URL, APP_TITLE)
         } else {
             OpenAiCompatibleProvider(
@@ -75,6 +76,15 @@ class AppContainer(context: Context) {
                 displayName = "Custom endpoint",
                 transport = transport,
                 configProvider = configProvider
+            )
+        }
+        // This decorator is the final boundary before provider serialization. It redacts
+        // passwords, OTPs, PINs, payment details, bank-account values and authentication
+        // codes from every completion request, including test mode and regeneration.
+        return PrivacyFilteringAiProvider(provider) { categories ->
+            eventLog.log(
+                "Sensitive values redacted before the AI request (${categories.joinToString { it.name }})",
+                "privacy"
             )
         }
     }

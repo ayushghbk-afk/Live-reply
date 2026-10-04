@@ -1,12 +1,13 @@
 package com.liveaireply.app.overlay
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -31,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.liveaireply.app.engine.AssistantRuntime
@@ -38,6 +40,7 @@ import com.liveaireply.app.engine.AssistantStatus
 import com.liveaireply.app.engine.OverlayAction
 import com.liveaireply.app.engine.OverlayState
 import com.liveaireply.app.ui.theme.LiveReplyTheme
+import kotlin.math.roundToInt
 
 /**
  * The floating control. Collapsed it is a status dot; expanded it is the suggestion card
@@ -69,9 +72,23 @@ private fun CollapsedDot(state: OverlayState, scale: Float, alpha: Float) {
         shape = CircleShape,
         color = statusColor(state.status).copy(alpha = alpha),
         modifier = Modifier
+            .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
             .size((44 * scale).dp)
+            .clickable { act(OverlayAction.TOGGLE_EXPAND) }
             .pointerInput(Unit) {
-                detectDragGestures { change, drag ->
+                detectDragGestures(
+                    onDragEnd = {
+                        val current = AssistantRuntime.container?.currentSettings?.overlayPosition
+                        if (current != null) {
+                            AssistantRuntime.overlayPositionUpdater?.invoke(
+                                current.x + offsetX.roundToInt(),
+                                current.y + offsetY.roundToInt()
+                            )
+                        }
+                        offsetX = 0f
+                        offsetY = 0f
+                    }
+                ) { change, drag ->
                     change.consume()
                     offsetX += drag.x
                     offsetY += drag.y
@@ -84,16 +101,6 @@ private fun CollapsedDot(state: OverlayState, scale: Float, alpha: Float) {
                 color = Color.White,
                 fontSize = (16 * scale).sp
             )
-        }
-    }
-    if (offsetX != 0f || offsetY != 0f) {
-        androidx.compose.runtime.LaunchedEffect(offsetX, offsetY) {
-            AssistantRuntime.container?.let {
-                val current = it.currentSettings.overlayPosition
-                // Persist the drag only when the finger settles.
-                kotlinx.coroutines.delay(600)
-                AssistantRuntime.publishOverlay(state)
-            }
         }
     }
 }

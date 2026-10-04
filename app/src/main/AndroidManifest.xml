@@ -7,20 +7,20 @@
 
   Deliberately NOT requested, and why:
 
-    * QUERY_ALL_PACKAGES - no code path enumerates installed apps. The apps the assistant
-      may act on come from a fixed list of package names (ChatAdapterRegistry.KNOWN_APPS)
-      and are matched against the package name that arrives with an accessibility event.
+    * QUERY_ALL_PACKAGES - no code path enumerates installed apps. Package names come from
+      the user's explicit enabled-app list and are matched against accessibility events.
     * RECEIVE_SMS / READ_SMS - the app never reads messages; it reads text that is already
       rendered on screen.
     * BIND_NOTIFICATION_LISTENER_SERVICE / NOTIFICATION_LISTENER - no notification access.
-    * REQUEST_IGNORE_BATTERY_OPTIMIZATIONS - the Permissions screen deep-links into the
-      system battery-optimisation list instead (MainActivity), which needs no permission.
-    * RECORD_AUDIO / CAMERA / location / contacts / storage - none of these are used.
+    * REQUEST_IGNORE_BATTERY_OPTIMIZATIONS - Security & Settings opens the general system
+      battery-optimisation list instead, which needs no permission.
+    * MANAGE_EXTERNAL_STORAGE / storage, REQUEST_INSTALL_PACKAGES, SMS, contacts, phone,
+      location, RECORD_AUDIO and CAMERA - none of these data sources or actions are used.
 
-  The two capabilities that Play Protect blocks for internet-sideloaded installs
-  (ACCESSIBILITY and, if present, SMS / notification-listener access) are discussed in
-  README -> "Google Play Protect": accessibility is the core of the product and cannot be
-  removed without removing the product, so it is declared openly instead of hidden.
+  Accessibility, overlay and MediaProjection are high-risk capabilities that can trigger
+  Android/Google Play review or warnings. Accessibility is core to this product and the
+  other two are optional, so each is declared openly rather than hidden. A transparent,
+  correctly signed build is not a guarantee of warning-free installation or Play approval.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -40,20 +40,6 @@
     <!-- The floating control. Granted explicitly by the user in system Settings
          ("Display over other apps"); it is never granted silently. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-
-    <!--
-      Package visibility: only the chat apps this build ships adapter hints for. This is
-      not a permission and it does not let the app list anything else that is installed.
-    -->
-    <queries>
-        <package android:name="com.whatsapp" />
-        <package android:name="com.whatsapp.w4b" />
-        <package android:name="org.telegram.messenger" />
-        <package android:name="com.instagram.android" />
-        <package android:name="com.discord" />
-        <package android:name="com.android.chrome" />
-        <package android:name="org.mozilla.firefox" />
-    </queries>
 
     <application
         android:name=".LiveReplyApplication"
@@ -93,13 +79,11 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Live conversation assistant: reads chat text through the
-                    accessibility service, drafts a reply with a user configured AI
-                    endpoint, and shows it in a floating overlay." />
+                android:value="Live conversation assistant: reads selected visible chat text through Accessibility, drafts a reply with the user-configured AI endpoint, and shows it in the app or optional user-enabled overlay." />
         </service>
 
-        <!-- Screen capture for the on-device OCR fallback. Started only after the user
-             approves the system MediaProjection dialog, and stopped again immediately. -->
+        <!-- One-shot, on-device OCR fallback. Started only with the RESULT_OK token from
+             Android's MediaProjection dialog and stopped after the authorized frame. -->
         <service
             android:name=".ocr.ScreenCaptureService"
             android:enabled="true"
@@ -119,18 +103,15 @@
              (res/xml/accessibility_service_config.xml), where it is explicitly false -
              which is also the platform default. This app is a conversation assistant,
              not a tool for people with disabilities, so it must not claim that
-             designation: Google Play Protect warns users specifically about apps that
-             set isAccessibilityTool="true" without being a disability-support tool, and
-             claiming it here would be deceptive. The user-facing consequence is real and
-             expected - Android treats this as a non-accessibility-tool service and asks
-             for extra confirmation.
+             designation. Claiming disability-tool status here would be inaccurate and
+             deceptive; the in-app and Android service descriptions instead explain the
+             conversation-assistant behavior directly.
 
-          2. `android:packageNames` is intentionally NOT restricted, because the user
-             chooses which chat apps to watch at runtime (and can watch an app this build
-             has no adapter hints for). The service therefore receives window events from
-             every app; it refuses to process anything that is not enabled, is excluded,
-             or looks sensitive - that gating is in the engine, and the first-run screen
-             tells the user exactly this.
+          2. Event delivery is package-scoped. The metadata starts with the three default
+             chat packages and the service updates AccessibilityServiceInfo.packageNames to
+             exactly the user's enabled package list at runtime. An empty list is never
+             represented as null (which would mean all apps). Sensitive/excluded screens
+             are rejected before conversation extraction.
         -->
         <service
             android:name=".accessibility.LiveReplyAccessibilityService"
@@ -144,10 +125,5 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
-
-        <!-- Notification actions (Pause / Stop) arrive here. -->
-        <receiver
-            android:name=".notifications.AssistantActionReceiver"
-            android:exported="false" />
     </application>
 </manifest>

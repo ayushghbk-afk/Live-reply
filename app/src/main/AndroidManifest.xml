@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Reaching the configured AI endpoint, and knowing when there is no network. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Persistent monitoring notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- The floating control. Granted explicitly by the user in Settings. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Only used to show app names in the Supported apps list. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <package android:name="org.telegram.messenger" />
+        <package android:name="com.instagram.android" />
+        <package android:name="com.discord" />
+        <package android:name="com.android.chrome" />
+        <package android:name="org.mozilla.firefox" />
+    </queries>
+
+    <application
+        android:name=".LiveReplyApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.LiveAIReply"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.LiveAIReply">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          The assistant's foreground service.
+
+          Android 14+ requires a foreground service type; "specialUse" is the correct
+          classification for an accessibility-driven assistant that also draws an
+          overlay, and the subtype property below states exactly what it is for.
+        -->
+        <service
+            android:name=".engine.AssistantService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Live conversation assistant: reads chat text through the
+                    accessibility service, drafts a reply with a user configured AI
+                    endpoint, and shows it in a floating overlay." />
+        </service>
+
+        <!-- Screen capture for the on-device OCR fallback. -->
+        <service
+            android:name=".ocr.ScreenCaptureService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!--
+          The accessibility service.
+
+          It is the only component that can read another app's chat, and Android only
+          starts it after the user switches it on in system Settings. packageNames is
+          deliberately not restricted: the user picks which apps to watch at runtime,
+          and the engine refuses to act on anything that is not enabled.
+        -->
+        <service
+            android:name=".accessibility.LiveReplyAccessibilityService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- Notification actions (Pause / Stop) arrive here. -->
+        <receiver
+            android:name=".notifications.AssistantActionReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

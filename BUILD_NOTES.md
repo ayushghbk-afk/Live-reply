@@ -35,6 +35,22 @@ Bugs the tests caught and that were fixed:
 - `ReplySanitizer.limitEmojis` walked UTF-16 chars and split surrogate pairs, so emoji
   limiting never worked.
 
+## Build automation added (runs outside this sandbox)
+
+`./gradlew assembleDebug` cannot run in this sandbox (no JDK, no Android SDK, every
+Google/Maven host blocked - see below), so the build is delegated to GitHub Actions,
+which does have the toolchain:
+
+- `.github/workflows/build-apk.yml` - tests + `assembleDebug` + `assembleRelease` on every
+  push and pull request, uploads the APKs as a downloadable artifact.
+- `.github/workflows/release-apk.yml` - on a `v*` tag, signs the release APK with the
+  keystore from repository secrets (if configured) and attaches everything to a GitHub
+  Release.
+
+The YAML was validated locally (`yaml.safe_load`) and every `run:` block passes
+`bash -n`. The Gradle build itself is only executed on the runner - see
+"Not executed here, and why".
+
 ## Not executed here, and why
 
 **`./gradlew assembleDebug` was never run.** This sandbox has no Android toolchain and no

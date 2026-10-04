@@ -10,7 +10,7 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.ViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
 import com.liveaireply.app.engine.AssistantRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.collectLatest
@@ -52,7 +52,9 @@ class OverlayController(
 
         val owner = OverlayLifecycleOwner().also { lifecycleOwner = it }
         val view = ComposeView(context)
-        ViewTreeLifecycleOwner.set(view, owner)
+        // Since Lifecycle 2.6 ViewTreeLifecycleOwner is Kotlin-only and is set through
+        // the View extension below (the old ViewTreeLifecycleOwner.set() is Java-only).
+        view.setViewTreeLifecycleOwner(owner)
         view.setContent { OverlayContent() }
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

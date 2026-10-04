@@ -51,7 +51,20 @@ The workflows sign the release APK when these **repository secrets** are set
 
 The secrets are encrypted by GitHub and are not readable by anyone (including the build
 logs); the keystore is written to a temporary file on the runner and is deleted with the
-runner. Base64 of the keystore is *not* the same as committing the key: only the encrypted
+runner.
+
+Rather than copying the values around, let the helper do it — it prints commands, not
+secrets, and reads the password from `keystore.properties`:
+
+```bash
+tools/signing/print-ci-secret-commands.sh          # print the commands
+tools/signing/print-ci-secret-commands.sh | bash   # run them (needs gh authenticated)
+```
+
+Once the secrets exist, the next build of any branch produces a **signed**
+`LiveReply-<version>-release.apk` in the `live-ai-reply-apk-…` artifact, and a tag push
+(`git tag v1.0.1 && git push origin v1.0.1`) publishes it to a GitHub Release. The workflow
+fails rather than publishing an unsigned release when a key is configured. Base64 of the keystore is *not* the same as committing the key: only the encrypted
 secret store and your own machine hold it.
 
 ## If you lose this key

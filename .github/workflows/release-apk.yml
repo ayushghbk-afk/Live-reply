@@ -188,43 +188,10 @@ jobs:
       - name: Verify the APKs and publish the inspection report
         run: |-
           set -uo pipefail
-          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          build_tools="$(ls -d "$sdk"/build-tools/*/ 2>/dev/null | sort -V | tail -n1)"
-          cmdline="$sdk/cmdline-tools/latest/bin"
-          report=dist/BUILD-REPORT.txt
-          : > "$report"
-          for apk in dist/*.apk; do
-            [ -e "$apk" ] || continue
-            {
-              echo "==================================================================="
-              echo "APK            : $(basename "$apk")"
-              echo "size           : $(du -h "$apk" | cut -f1) ($(stat -c%s "$apk") bytes)"
-              echo "sha256         : $(sha256sum "$apk" | cut -d' ' -f1)"
-              echo "--- aapt2 dump badging (identity, sdk levels, permissions) ---"
-              "${build_tools}aapt2" dump badging "$apk" 2>&1 \
-                | grep -E "^(package|sdkVersion|targetSdkVersion|application-label|launchable-activity|uses-permission|uses-implied-permission)" || true
-              echo "--- merged manifest ---"
-              if [ -x "$cmdline/apkanalyzer" ]; then
-                "$cmdline/apkanalyzer" manifest print "$apk" 2>/dev/null || true
-              else
-                "${build_tools}aapt2" dump xmltree --file AndroidManifest.xml "$apk" 2>&1 \
-                  | grep -E "^ *E: |^ *A: android:(name|exported|permission|foregroundServiceType|versionCode|versionName|debuggable)" || true
-              fi
-              echo "--- apksigner verify (signature scheme + certificate) ---"
-              "${build_tools}apksigner" verify --verbose --print-certs "$apk" 2>&1 || true
-              echo ""
-            } >> "$report"
-          done
-          cat "$report"
-          printf '::notice title=APK inspection report::%s\n' \
-            "$(tr -d '\r' < "$report" | head -c 55000 | sed 's/%/%25/g' | sed -z 's/\n/%0A/g')"
-          {
-            echo '### APK inspection report'
-            echo ''
-            echo '```text'
-            head -c 50000 "$report"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          shopt -s nullglob
+          apks=(dist/*.apk)
+          [ ${#apks[@]} -gt 0 ] || { echo "No APK to verify."; exit 0; }
+          bash tools/ci/inspect-apks.sh "${apks[@]}"
 
       - name: Checksums and summary
         env:

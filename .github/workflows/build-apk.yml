@@ -195,78 +195,24 @@ jobs:
           SIGNING_CONFIGURED: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         run: |-
           set -uo pipefail
-          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          build_tools="$(ls -d "$sdk"/build-tools/*/ 2>/dev/null | sort -V | tail -n1)"
-          cmdline="$sdk/cmdline-tools/latest/bin"
-          mkdir -p dist
-          report=dist/BUILD-REPORT.txt
-          : > "$report"
-
           shopt -s nullglob
           apks=(app/build/outputs/apk/*/*.apk)
           if [ ${#apks[@]} -eq 0 ]; then
-            echo "No APK was produced, so there is nothing to verify." | tee -a "$report"
+            echo "No APK was produced, so there is nothing to verify."
+            mkdir -p dist
+            : > dist/BUILD-REPORT.txt
             exit 0
           fi
-
-          for apk in "${apks[@]}"; do
-            {
-              echo "==================================================================="
-              echo "APK            : $(basename "$apk")"
-              echo "built path     : $apk"
-              echo "size           : $(du -h "$apk" | cut -f1) ($(stat -c%s "$apk") bytes)"
-              echo "sha256         : $(sha256sum "$apk" | cut -d' ' -f1)"
-            } >> "$report"
-
-            echo "--- aapt2 dump badging (identity, sdk levels, permissions) ---" >> "$report"
-            if [ -n "$build_tools" ]; then
-              "${build_tools}aapt2" dump badging "$apk" 2>&1 \
-                | grep -E "^(package|sdkVersion|targetSdkVersion|application-label|launchable-activity|uses-permission|uses-implied-permission)" \
-                >> "$report" || true
-            else
-              echo "aapt2 not found" >> "$report"
-            fi
-
-            echo "--- merged manifest: components and their exposure ---" >> "$report"
-            if [ -x "$cmdline/apkanalyzer" ]; then
-              "$cmdline/apkanalyzer" manifest print "$apk" 2>/dev/null >> "$report" || true
-            elif [ -n "$build_tools" ]; then
-              "${build_tools}aapt2" dump xmltree --file AndroidManifest.xml "$apk" 2>&1 \
-                | grep -E "^ *E: (manifest|application|activity|service|receiver|provider|uses-permission|meta-data|queries|property)|^ *A: (android:(name|exported|permission|foregroundServiceType|isAccessibilityTool|debuggable|versionCode|versionName))" \
-                >> "$report" || true
-            fi
-
-            echo "--- apksigner verify (signature scheme + certificate) ---" >> "$report"
-            if [ -n "$build_tools" ]; then
-              "${build_tools}apksigner" verify --verbose --print-certs "$apk" 2>&1 >> "$report" || true
-            else
-              echo "apksigner not found" >> "$report"
-            fi
-            echo "" >> "$report"
-          done
-
-          cat "$report"
+          bash tools/ci/inspect-apks.sh "${apks[@]}"
 
           # Guards: the signing state must match the configuration, otherwise the build is
-          # lying to the user about what it produced.
+          # telling the user something untrue about what it produced.
           if [ "${SIGNING_CONFIGURED:-false}" = "true" ] && [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
             echo "::warning title=Release APK is unsigned::A release signing key was configured, but Gradle produced app-release-unsigned.apk - check keystore.properties and the signing secrets."
           fi
           if [ "${SIGNING_CONFIGURED:-false}" != "true" ] && [ -f app/build/outputs/apk/release/app-release.apk ]; then
             echo "::warning title=Signed release APK without secrets::No ANDROID_KEYSTORE_BASE64 secret is set, yet the release build produced a signed APK - check which key it used."
           fi
-
-          # One annotation carries the whole report, so the facts are readable from the
-          # run page and from the API without downloading the artifact.
-          printf '::notice title=APK inspection report::%s\n' \
-            "$(tr -d '\r' < "$report" | head -c 55000 | sed 's/%/%25/g' | sed -z 's/\n/%0A/g')"
-          {
-            echo '### APK inspection report'
-            echo ''
-            echo '```text'
-            head -c 50000 "$report"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write the job summary
         if: always()
@@ -311,8 +257,7 @@ jobs:
           name: live-ai-reply-apk-${{ github.sha }}
           path: |
             dist/*.apk
-            dist/BUILD-REPORT.txt
-            dist/SHA256SUMS.txt
+            dist/*.txt
           if-no-files-found: warn
           retention-days: 30
           # APKs are already compressed - don't waste time zipping them again.

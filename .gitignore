@@ -14,6 +14,8 @@ local.properties
 !debug.keystore
 
 # ---------------------------------------------------------------------------
+/dist/
+
 # Signing material - a private key must never be committed. See signing/README.md
 # ---------------------------------------------------------------------------
 keystore.properties

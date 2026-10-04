@@ -103,17 +103,20 @@ jobs:
             exit 0
           fi
           {
-            grep -n -E "^(e:|w: .*(error|Error)|FAILURE:|\* What went wrong|Execution failed|> Task .*FAILED|Caused by:|Unresolved reference|Could not (resolve|find|download|create|open)|No such (file|property|method)|error: )" gradle-build.log | head -n 150
-            echo '----- last 60 lines of the build log -----'
-            tail -n 60 gradle-build.log
+            grep -n -E "^(e:|w: .*(error|Error)|FAILURE:|\* What went wrong|Execution failed|> Task .*FAILED|Caused by:|Unresolved reference|Could not (resolve|find|download|create|open)|No such (file|property|method)|error: )" gradle-build.log | head -n 300
+            echo '----- last 80 lines of the build log -----'
+            tail -n 80 gradle-build.log
           } > build-failure.txt
           echo "extracted $(wc -l < build-failure.txt) diagnostic lines"
-          # One annotation per line: visible on the run page, and readable through the
-          # API without downloading the full (and here, unreachable) job log.
+          # Everything as one annotation first (GitHub keeps only the first 10 error
+          # annotations per step, so the complete text has to travel in a single one),
+          # then the most useful lines individually for the run page.
+          printf '::error title=Full build diagnostics::%s\n' \
+            "$(tr -d '\r' < build-failure.txt | head -c 55000 | sed 's/%/%25/g' | sed -z 's/\n/%0A/g')"
           i=0
           while IFS= read -r line; do
             i=$((i + 1))
-            [ "$i" -gt 40 ] && break
+            [ "$i" -gt 9 ] && break
             printf '::error title=Gradle failure::%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-1000)"
           done < build-failure.txt
           {

@@ -14,7 +14,10 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import com.liveaireply.app.engine.AssistantRuntime
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /** Lifecycle owner required by ComposeView when it is not inside an Activity. */
 private class OverlayLifecycleOwner : LifecycleOwner {
@@ -43,6 +46,7 @@ class OverlayController(
     private var rootView: ComposeView? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
     private var params: WindowManager.LayoutParams? = null
+    private var stateJob: Job? = null
     private var attached = false
 
     fun attach() {
@@ -66,15 +70,12 @@ class OverlayController(
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
+        val initialState = AssistantRuntime.overlayState.value
         val layoutParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            widthFor(initialState.expanded),
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                // Suggestions and visible conversation excerpts in this app's own overlay
-                // must not appear in screenshots or another MediaProjection session.
-                WindowManager.LayoutParams.FLAG_SECURE,
+            flagsFor(initialState.expanded),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -95,6 +96,50 @@ class OverlayController(
         attached = true
         AssistantRuntime.overlayPositionUpdater = ::updatePosition
         owner.resume()
+
+        // A collapsed WRAP_CONTENT window is only dot-sized. Explicitly resize and make
+        // the window focusable when state expands so the card is not clipped and its edit
+        // field can receive keyboard input. Collapse restores the non-focusable dot.
+        stateJob?.cancel()
+        stateJob = scope.launch {
+            AssistantRuntime.overlayState.collectLatest { state ->
+                applyExpandedState(state.expanded)
+            }
+        }
+    }
+
+    private fun applyExpandedState(expanded: Boolean) {
+        val view = rootView ?: return
+        val layoutParams = params ?: return
+        layoutParams.width = widthFor(expanded)
+        layoutParams.flags = flagsFor(expanded)
+
+        val metrics = context.resources.displayMetrics
+        val settings = AssistantRuntime.container?.currentSettings
+        val desiredX = settings?.overlayPosition?.x ?: layoutParams.x
+        val desiredY = settings?.overlayPosition?.y ?: layoutParams.y
+        val windowWidth = if (expanded) layoutParams.width else (52 * metrics.density).roundToInt()
+        layoutParams.x = desiredX.coerceIn(0, (metrics.widthPixels - windowWidth).coerceAtLeast(0))
+        layoutParams.y = desiredY.coerceIn(0, (metrics.heightPixels - 52 * metrics.density).roundToInt().coerceAtLeast(0))
+        runCatching { windowManager.updateViewLayout(view, layoutParams) }
+        view.requestLayout()
+    }
+
+    private fun widthFor(expanded: Boolean): Int {
+        if (!expanded) return WindowManager.LayoutParams.WRAP_CONTENT
+        val metrics = context.resources.displayMetrics
+        return (340 * metrics.density).roundToInt().coerceAtMost(
+            (metrics.widthPixels - 16 * metrics.density).roundToInt().coerceAtLeast(1)
+        )
+    }
+
+    private fun flagsFor(expanded: Boolean): Int {
+        val secureLayoutFlags = WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            // Suggestions and visible conversation excerpts in this app's own overlay
+            // must not appear in screenshots or another MediaProjection session.
+            WindowManager.LayoutParams.FLAG_SECURE
+        return if (expanded) secureLayoutFlags
+        else secureLayoutFlags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
     }
 
     fun updatePosition(x: Int, y: Int) {
@@ -113,8 +158,10 @@ class OverlayController(
     }
 
     fun detach() {
-        val view = rootView ?: return
-        runCatching { windowManager.removeView(view) }
+        stateJob?.cancel()
+        stateJob = null
+        val view = rootView
+        if (view != null) runCatching { windowManager.removeView(view) }
         lifecycleOwner?.destroy()
         AssistantRuntime.overlayPositionUpdater = null
         rootView = null

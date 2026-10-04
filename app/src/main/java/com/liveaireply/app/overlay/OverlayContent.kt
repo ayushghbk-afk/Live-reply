@@ -1,7 +1,7 @@
 package com.liveaireply.app.overlay
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -74,20 +74,27 @@ private fun CollapsedDot(state: OverlayState, scale: Float, alpha: Float) {
         modifier = Modifier
             .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
             .size((44 * scale).dp)
-            .clickable { act(OverlayAction.TOGGLE_EXPAND) }
-            .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragEnd = {
-                        val current = AssistantRuntime.container?.currentSettings?.overlayPosition
-                        if (current != null) {
-                            AssistantRuntime.overlayPositionUpdater?.invoke(
-                                current.x + offsetX.roundToInt(),
-                                current.y + offsetY.roundToInt()
-                            )
-                        }
-                        offsetX = 0f
-                        offsetY = 0f
+            // Keep tap and drag recognizers independent. A clickable modifier combined
+            // with detectDragGestures on the same node can consume the down/up sequence,
+            // leaving the collapsed bubble impossible to open on some Compose versions.
+            .pointerInput("open-overlay") {
+                detectTapGestures(onTap = { act(OverlayAction.TOGGLE_EXPAND) })
+            }
+            .pointerInput("drag-overlay") {
+                fun finishDrag() {
+                    val current = AssistantRuntime.container?.currentSettings?.overlayPosition
+                    if (current != null && (offsetX != 0f || offsetY != 0f)) {
+                        AssistantRuntime.overlayPositionUpdater?.invoke(
+                            current.x + offsetX.roundToInt(),
+                            current.y + offsetY.roundToInt()
+                        )
                     }
+                    offsetX = 0f
+                    offsetY = 0f
+                }
+                detectDragGestures(
+                    onDragEnd = ::finishDrag,
+                    onDragCancel = ::finishDrag
                 ) { change, drag ->
                     change.consume()
                     offsetX += drag.x

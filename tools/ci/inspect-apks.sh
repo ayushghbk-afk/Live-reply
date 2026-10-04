@@ -56,7 +56,8 @@ for apk in "$@"; do
 
   badging="$("$aapt2" dump badging "$apk" 2>&1 || true)"
   "$aapt2" dump xmltree --file AndroidManifest.xml "$apk" > "$manifest_dump" 2>&1 || true
-  signature="$("$apksigner" verify --verbose --print-certs "$apk" 2>&1 || true)"
+  signature="$("$apksigner" verify --verbose --print-certs "$apk" 2>&1)"
+  signature_exit=$?
 
   identity_lines="$(printf '%s\n' "$badging" | grep -E "^(package:|minSdkVersion|sdkVersion|targetSdkVersion|application-label:)" || true)"
   permission_lines="$(printf '%s\n' "$badging" | grep -E "^uses-(permission|implied-permission):" || true)"
@@ -64,7 +65,10 @@ for apk in "$@"; do
   if [ -z "$component_lines" ]; then
     component_lines="$(grep -E '^ *E: |^ *A: android:(name|exported|permission|foregroundServiceType)' "$manifest_dump" | head -n 200 || true)"
   fi
-  signature_lines="$(printf '%s\n' "$signature" | grep -E "^(Verifies|Verified using|Number of signers|Signer #1 certificate (DN|SHA-256 digest|key algorithm)|WARNING)" || true)"
+  # Keep every verification/certificate line across build-tools output variants. In
+  # particular, record DOES NOT VERIFY and the command exit code for unsigned releases;
+  # absence of a signature must never look like an empty successful result.
+  signature_lines="$(printf '%s\n' "$signature" | grep -Ei "(DOES NOT VERIFY|Verifies|Verified using|Number of signers|Signer|certificate|WARNING|ERROR)" || true)"
 
   {
     echo "===================================================================="
@@ -78,7 +82,7 @@ for apk in "$@"; do
     printf '%s\n' "$permission_lines"
     echo "--- merged manifest: components and their exposure ---"
     printf '%s\n' "$component_lines"
-    echo "--- apksigner verify ---"
+    echo "--- apksigner verify (exit $signature_exit) ---"
     printf '%s\n' "$signature"
     echo "--- merged manifest (full dump) ---"
     head -c 20000 "$manifest_dump"
@@ -89,6 +93,7 @@ for apk in "$@"; do
     echo "$name  ($size_bytes bytes)"
     printf '%s\n' "$identity_lines" | sed 's/^/  /'
     echo "  sha256 (APK): $sha"
+    echo "  apksigner verify exit: $signature_exit"
     printf '%s\n' "$signature_lines" | sed 's/^/  /'
     echo ""
   } >> "$identity"
@@ -138,12 +143,13 @@ publish() {
 publish "APK identity, signing certificate and SHA-256" "$identity"
 publish "APK permissions (built artifact)" "$permissions"
 
-# One annotation per APK for the components: a single 4 KB message cannot hold both, and a
-# truncated component list is worse than none.
+# One annotation per APK for the complete component list: a single 4 KB message cannot hold
+# both variants, and filtering out non-exported library plumbing would make the report
+# incomplete. The source file remains in the artifact even if GitHub truncates an annotation.
 awk -v dir=dist '
   /^[^ ].*\.apk$/ { if (out) close(out); out = dir "/annotation-components-" ++n ".txt" }
   out { print >> out }
-' "$components_summary"
+' "$components"
 for f in dist/annotation-components-*.txt; do
   [ -s "$f" ] || continue
   publish "APK components: $(head -n1 "$f")" "$f"

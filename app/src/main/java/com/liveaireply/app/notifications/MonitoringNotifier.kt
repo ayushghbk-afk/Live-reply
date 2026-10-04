@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 import com.liveaireply.app.MainActivity
 import com.liveaireply.app.R
 import com.liveaireply.app.engine.AssistantService
+import com.liveaireply.app.ocr.ScreenCaptureService
 
 /**
  * The persistent notification.
@@ -36,6 +37,22 @@ class MonitoringNotifier(private val context: Context) {
     }
 
     fun build(title: String, status: String): Notification =
+        baseBuilder(title, status)
+            .addAction(0, context.getString(R.string.action_pause), assistantIntent(AssistantService.ACTION_PAUSE))
+            .addAction(0, context.getString(R.string.action_stop), assistantIntent(AssistantService.ACTION_STOP))
+            .build()
+
+    /** The OCR notification stops only the explicitly authorized capture session. */
+    fun buildCapture(title: String, status: String): Notification =
+        baseBuilder(title, status)
+            .addAction(0, context.getString(R.string.action_stop), captureIntent())
+            .build()
+
+    fun update(title: String, status: String) {
+        manager.notify(NOTIFICATION_ID, build(title, status))
+    }
+
+    private fun baseBuilder(title: String, status: String) =
         NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_ai_dot)
             .setContentTitle(context.getString(R.string.app_name))
@@ -46,13 +63,6 @@ class MonitoringNotifier(private val context: Context) {
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(openAppIntent())
-            .addAction(0, context.getString(R.string.action_pause), serviceIntent(AssistantService.ACTION_PAUSE))
-            .addAction(0, context.getString(R.string.action_stop), serviceIntent(AssistantService.ACTION_STOP))
-            .build()
-
-    fun update(title: String, status: String) {
-        manager.notify(NOTIFICATION_ID, build(title, status))
-    }
 
     fun cancel() = manager.cancel(NOTIFICATION_ID)
 
@@ -60,9 +70,15 @@ class MonitoringNotifier(private val context: Context) {
         context, 0, Intent(context, MainActivity::class.java), flags(PendingIntent.FLAG_UPDATE_CURRENT)
     )
 
-    private fun serviceIntent(action: String): PendingIntent = PendingIntent.getService(
+    private fun assistantIntent(action: String): PendingIntent = PendingIntent.getService(
         context, action.hashCode(),
         Intent(context, AssistantService::class.java).setAction(action),
+        flags(PendingIntent.FLAG_UPDATE_CURRENT)
+    )
+
+    private fun captureIntent(): PendingIntent = PendingIntent.getService(
+        context, ScreenCaptureService.ACTION_RELEASE.hashCode(),
+        Intent(context, ScreenCaptureService::class.java).setAction(ScreenCaptureService.ACTION_RELEASE),
         flags(PendingIntent.FLAG_UPDATE_CURRENT)
     )
 

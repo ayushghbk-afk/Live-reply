@@ -20,6 +20,11 @@ import kotlinx.coroutines.flow.StateFlow
  */
 object AssistantRuntime {
 
+    /** Immediate process-wide latch checked before reading, capture, generation or automation. */
+    @Volatile
+    var emergencyStopRequested: Boolean = false
+        private set
+
     @Volatile
     var container: AppContainer? = null
 
@@ -28,6 +33,9 @@ object AssistantRuntime {
 
     @Volatile
     var automation: AutomationController? = null
+
+    @Volatile
+    var overlayPositionUpdater: ((Int, Int) -> Unit)? = null
 
     private val _overlayState = MutableStateFlow(OverlayState())
     val overlayState: StateFlow<OverlayState> = _overlayState
@@ -59,12 +67,24 @@ object AssistantRuntime {
 
     fun updateSettings(settings: AppSettings) {
         container?.currentSettings = settings
+        if (settings.emergencyStopped) emergencyStopRequested = true
     }
 
-    /** Drops every reference; called when the foreground service is destroyed. */
+    fun requestEmergencyStop() {
+        emergencyStopRequested = true
+    }
+
+    /** Only an explicit user start action may clear the process-wide stop latch. */
+    fun clearEmergencyStopForUserStart() {
+        emergencyStopRequested = false
+    }
+
+    /** Drops every active engine reference; the emergency-stop latch remains sticky. */
     fun shutdown() {
         engine = null
-        automation = null
-        _overlayState.value = OverlayState()
+        // The accessibility service may still be connected. It owns and clears
+        // [automation] in its own lifecycle; dropping it here would make a later explicit
+        // restart unable to type until Android reconnects the accessibility service.
+        _overlayState.value = OverlayState(status = AssistantStatus.STOPPED, statusDetail = "Stopped")
     }
 }

@@ -16,9 +16,6 @@
 # Keep the accessibility service entry point (instantiated by the framework).
 -keep class com.liveaireply.app.accessibility.LiveReplyAccessibilityService { *; }
 
-# Keep notification action receivers (referenced by PendingIntent).
--keep class com.liveaireply.app.notifications.AssistantActionReceiver { *; }
-
 # Keep line numbers for readable crash reports.
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile

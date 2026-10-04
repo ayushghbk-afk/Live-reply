@@ -78,8 +78,8 @@ data class OcrLine(val text: String, val bounds: RectView, val confidence: Float
 /**
  * On-device OCR fallback.
  *
- * Pixels never leave the device: the bitmap is decoded, recognised and recycled here.
- * The caller decides whether to keep a diagnostic copy; by default it does not.
+ * Pixels never leave the device: the bitmap is recognised in memory and recycled by the
+ * one-shot capture service. There is no diagnostic screenshot or image-storage path.
  */
 class OcrTextExtractor {
 

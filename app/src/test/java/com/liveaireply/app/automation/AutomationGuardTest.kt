@@ -11,8 +11,10 @@ class AutomationGuardTest {
 
     private val autoSettings = AppSettings(
         mode = AssistantMode.AUTO,
+        monitoringEnabled = true,
         autoReplyEnabled = true,
-        acknowledgedAutomationRisk = true
+        acknowledgedAutomationRisk = true,
+        acknowledgedCapabilities = true
     )
 
     private fun context(

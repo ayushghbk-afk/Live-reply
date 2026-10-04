@@ -1,6 +1,8 @@
 package com.liveaireply.app.ui
 
+import android.app.Activity
 import android.app.Application
+import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.liveaireply.app.ai.AiCompletionRequest
@@ -10,9 +12,13 @@ import com.liveaireply.app.ai.ModelListOutcome
 import com.liveaireply.app.di.AppContainer
 import com.liveaireply.app.engine.AssistantRuntime
 import com.liveaireply.app.engine.AssistantService
+import com.liveaireply.app.engine.EmergencyStopController
 import com.liveaireply.app.engine.EngineResult
+import com.liveaireply.app.ocr.ScreenCaptureService
+import com.liveaireply.app.security.CapabilityStatus
 import com.liveaireply.app.settings.AppSettings
 import com.liveaireply.app.settings.AssistantMode
+import com.liveaireply.app.settings.CaptureScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -39,6 +45,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val personas = MutableStateFlow(container.personaRepository.all())
     val overlayState = AssistantRuntime.overlayState
     val errors = AssistantRuntime.errors
+    val ocrCaptureState = ScreenCaptureService.captureState
 
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy
@@ -47,42 +54,171 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val message: StateFlow<String?> = _message
 
     fun update(transform: (AppSettings) -> AppSettings) {
-        viewModelScope.launch {
-            container.settingsRepository.update(transform)
-            val latest = container.settingsRepository.settings.let { flow ->
-                var value = container.currentSettings
-                flow.collect { value = it }
-                value
-            }
-            container.currentSettings = latest
+        viewModelScope.launch { persist(transform) }
+    }
+
+    private suspend fun persist(transform: (AppSettings) -> AppSettings): AppSettings {
+        val latest = container.settingsRepository.update(transform)
+        container.currentSettings = latest
+        return latest
+    }
+
+    fun acknowledgeCapabilities(accepted: Boolean) {
+        if (!accepted) {
+            EmergencyStopController.stopNow(getApplication(), "Disclosure acceptance withdrawn")
+        }
+        update { it.copy(acknowledgedCapabilities = accepted) }
+    }
+
+    fun finishSetup() = update { it.copy(setupCompleted = it.acknowledgedCapabilities) }
+
+    fun setMode(mode: AssistantMode) {
+        if (mode == AssistantMode.AUTO) {
+            _message.value = "Review and confirm the Auto-mode disclosure before enabling Auto."
+            return
+        }
+        val disableAutomation: (AppSettings) -> AppSettings = {
+            it.copy(
+                mode = mode,
+                autoReplyEnabled = false,
+                acknowledgedAutomationRisk = false
+            )
+        }
+        // The engine reads this process cache immediately before send. Update it
+        // synchronously so leaving Auto takes effect before the DataStore write completes.
+        container.currentSettings = disableAutomation(container.currentSettings)
+            .enforceSafetyInvariants()
+        update(disableAutomation)
+    }
+
+    /** Called only from the explicit Auto-mode confirmation dialog. */
+    fun enableAutoModeConfirmed() {
+        if (!settings.value.acknowledgedCapabilities) {
+            _message.value = "Accept the security and privacy disclosure before enabling Auto mode."
+            return
+        }
+        update {
+            it.copy(
+                mode = AssistantMode.AUTO,
+                autoReplyEnabled = true,
+                acknowledgedAutomationRisk = true
+            )
         }
     }
 
-    fun setMode(mode: AssistantMode) = update { it.copy(mode = mode) }
+    fun disableAutoReply() {
+        val disable: (AppSettings) -> AppSettings = {
+            it.copy(autoReplyEnabled = false, acknowledgedAutomationRisk = false)
+        }
+        container.currentSettings = disable(container.currentSettings).enforceSafetyInvariants()
+        update(disable)
+    }
 
-    fun setMonitoring(enabled: Boolean) = update { it.copy(monitoringEnabled = enabled, emergencyStopped = false) }
+    fun setMonitoring(enabled: Boolean) {
+        val context = getApplication<Application>()
+        if (!enabled) {
+            val stopMonitoring: (AppSettings) -> AppSettings = {
+                it.copy(
+                    monitoringEnabled = false,
+                    autoReplyEnabled = false,
+                    acknowledgedAutomationRisk = false
+                )
+            }
+            // Pause the engine and tear services down synchronously. If an AI request is
+            // already in flight, ReplyEngine's post-request `running` check prevents send.
+            container.currentSettings = stopMonitoring(container.currentSettings)
+                .enforceSafetyInvariants()
+            AssistantRuntime.engine?.pauseAll("Monitoring turned off by user")
+            context.stopService(Intent(context, AssistantService::class.java))
+            context.stopService(Intent(context, ScreenCaptureService::class.java))
+            update(stopMonitoring)
+            return
+        }
 
-    fun setAutoReply(enabled: Boolean) = update { it.copy(autoReplyEnabled = enabled) }
+        viewModelScope.launch {
+            val current = settings.value
+            if (!current.acknowledgedCapabilities) {
+                _message.value = "Accept the security and privacy disclosure first."
+                return@launch
+            }
+            if (!CapabilityStatus.accessibilityEnabled(context)) {
+                _message.value = "Enable Live AI Reply in Android Accessibility settings first."
+                return@launch
+            }
+
+            AssistantRuntime.clearEmergencyStopForUserStart()
+            persist { it.copy(monitoringEnabled = true, emergencyStopped = false) }
+            startService()
+        }
+    }
 
     fun emergencyStop() {
-        update { it.copy(emergencyStopped = true, monitoringEnabled = false, autoReplyEnabled = false) }
-        AssistantRuntime.engine?.stopAll("Stopped from the app")
-        stopService()
+        EmergencyStopController.stopNow(getApplication(), "Stopped from the app")
+        _message.value = "STOP is active. Monitoring, overlay, OCR and automatic replies are off."
     }
 
     fun startService() {
         val context = getApplication<Application>()
         androidx.core.content.ContextCompat.startForegroundService(
             context,
-            android.content.Intent(context, AssistantService::class.java).setAction(AssistantService.ACTION_START)
+            Intent(context, AssistantService::class.java).setAction(AssistantService.ACTION_START)
         )
     }
 
-    fun stopService() {
+    fun setOverlayEnabled(enabled: Boolean) {
         val context = getApplication<Application>()
-        context.startService(
-            android.content.Intent(context, AssistantService::class.java).setAction(AssistantService.ACTION_STOP)
-        )
+        if (enabled && !settings.value.acknowledgedCapabilities) {
+            _message.value = "Accept the security and privacy disclosure first."
+            return
+        }
+        if (enabled && !CapabilityStatus.overlayGranted(context)) {
+            _message.value = "Grant Display over other apps first, then enable the floating assistant."
+            return
+        }
+        update { it.copy(overlayEnabled = enabled) }
+    }
+
+    fun setOcrEnabled(enabled: Boolean) {
+        val context = getApplication<Application>()
+        if (enabled && !settings.value.acknowledgedCapabilities) {
+            _message.value = "Accept the security and privacy disclosure first."
+            return
+        }
+        if (!enabled) context.stopService(Intent(context, ScreenCaptureService::class.java))
+        update {
+            it.copy(
+                ocrEnabled = enabled,
+                captureScope = if (enabled) CaptureScope.CONVERSATION_AREA else CaptureScope.OFF
+            )
+        }
+    }
+
+    /** Called only with the result of Android's MediaProjection confirmation activity. */
+    fun armScreenCapture(resultCode: Int, data: Intent?) {
+        val context = getApplication<Application>()
+        val current = settings.value
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            _message.value = "Screen capture was not authorized. OCR remains idle."
+            return
+        }
+        if (!current.acknowledgedCapabilities || !current.ocrEnabled ||
+            current.emergencyStopped || AssistantRuntime.emergencyStopRequested
+        ) {
+            _message.value = "OCR is off or STOP is active. No screen capture was started."
+            return
+        }
+        val serviceIntent = Intent(context, ScreenCaptureService::class.java)
+            .setAction(ScreenCaptureService.ACTION_ARM)
+            .putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+            .putExtra(ScreenCaptureService.EXTRA_DATA, data)
+        androidx.core.content.ContextCompat.startForegroundService(context, serviceIntent)
+        _message.value = "Android authorized one OCR fallback capture."
+    }
+
+    fun stopScreenCapture() {
+        val context = getApplication<Application>()
+        context.stopService(Intent(context, ScreenCaptureService::class.java))
+        _message.value = "Screen capture stopped."
     }
 
     fun saveApiKey(key: String) {

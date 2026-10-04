@@ -1,155 +1,103 @@
-# Build notes — what was actually executed, and what was not
+# Build and verification notes
 
-This file records the build environment honestly. It exists because "the build should work"
-is not evidence; every claim below was produced by a command whose output is quoted.
+**Audit date:** 4 October 2026
+**Branch:** `arena/01a107c2-live-reply`
 
----
+This file records what was actually executed for the current hardening change. A source check,
+an Android Gradle build, APK signature verification, and physical-device testing are different
+levels of evidence and are not presented as interchangeable.
 
-## 1. Provenance of the APK that Play Protect blocked
+## Local sandbox
 
-| Question | Answer |
-|---|---|
-| Which file? | `LiveReply-1.0.0-debug.apk`, 55,703,461 bytes |
-| Produced by this repository? | **Yes.** Name and size match the `Collect the APKs` step of `.github/workflows/release-apk.yml` (`app-debug.apk` → `LiveReply-1.0.0-debug.apk`). |
-| Which run? | GitHub Actions run [`37205108074`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37205108074) — workflow **Release APK**, event `push`, tag `v1.0.0`, commit `7514cd6b1e82cc45c950a9c0024a3b6666714be`, conclusion `success`. |
-| Where from? | GitHub Release [`v1.0.0`](https://github.com/ayushghbk-afk/Live-reply/releases/tag/v1.0.0), asset `LiveReply-1.0.0-debug.apk` (uploaded 2026-10-04T13:23:15Z) together with `LiveReply-1.0.0-release-unsigned.apk` (44,751,730 bytes) and `SHA256SUMS.txt`. |
-| Was it a debug build? | **Yes.** It is the `debug` build type: `android:debuggable="true"`, `isMinifyEnabled = false`, and signed with a debug keystore that the workflow *generated inside that run* (`keytool -genkeypair … -dname "CN=Android Debug,O=Android,C=US"`), because the `ANDROID_DEBUG_KEYSTORE_BASE64` secret is not configured. |
-| Was it installable as a normal release? | No. The published "release" asset in that release is **unsigned** (`app-release-unsigned.apk`) because the Gradle release build type had no `signingConfig` and no release key was configured. |
+A temporary JDK 17.0.9 runtime was provisioned from `jdk4py`, and Kotlin compiler 2.0.21 was
+provisioned under `/tmp`. The sandbox has no Android SDK, `aapt2`, `apkanalyzer`, or `apksigner`.
 
-Two consequences that the user hit:
-
-1. **"App not installed" (screenshot 1).** A debug APK signed by a key generated per CI run
-   cannot replace an APK signed by a different key; Android reports
-   `INSTALL_FAILED_UPDATE_INCOMPATIBLE` and the on-device installer shows only "App not
-   installed". Installing a *second* CI debug build on top of the first therefore always
-   fails.
-2. **"App blocked to protect your device" (screenshot 2).** This one is *not* about debug vs
-   release. It is Google's automatic block for apps installed from internet-sideloading
-   sources that declare accessibility (and/or SMS / notification-listener) access — quoted
-   from [Google's developer guidance](https://developers.google.com/android/play-protect/warning-dev-guidance)
-   in README section 5.1. No permission change removes it, because accessibility *is* the
-   product.
-
----
-
-## 2. Attempted in this environment, with the real output
-
-### `./gradlew clean`, `./gradlew test`, `./gradlew assembleDebug`
-
-All three were run (JDK 17 supplied, see below). All three fail before Gradle starts, in the
-wrapper itself:
+The four requested Gradle commands were each executed literally:
 
 ```text
-Exception in thread "main" javax.net.ssl.SSLHandshakeException: Remote host terminated the handshake
-    at java.base/sun.net.www.protocol.https.HttpsClient.afterConnect(Unknown Source)
-    at org.gradle.wrapper.Install.forceFetch(SourceFile:2)
-    at org.gradle.wrapper.Install$1.call(SourceFile:8)
-    at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+./gradlew clean           -> exit 1
+./gradlew test            -> exit 1
+./gradlew assembleDebug   -> exit 1
+./gradlew assembleRelease -> exit 1
+```
+
+Each failed in the Gradle wrapper before project configuration because the sandbox could not
+download Gradle 8.9 from `services.gradle.org`:
+
+```text
+javax.net.ssl.SSLHandshakeException: Remote host terminated the handshake
 Caused by: java.io.EOFException: SSL peer shut down incorrectly
 ```
 
-The wrapper cannot download `gradle-8.9-bin.zip` from `services.gradle.org`. This is a
-**network-allowlist restriction of the development sandbox**, not a defect in the project.
-Hosts reachable from here: `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`,
-`api.github.com`, `codeload.github.com`, `github.com`. Everything else the Android build needs
-is refused at TLS level (HTTP 000 / `SSL_ERROR_SYSCALL`):
+This is a local environment/network limitation, not a successful or failed Android compile.
+The workflow therefore runs the same four commands on a provisioned GitHub Actions Android
+runner; its result is recorded below after completion.
 
-| Host | Needed for |
+## Source/JVM checks executed locally
+
+| Check | Result |
 |---|---|
-| `services.gradle.org` | the Gradle distribution itself |
-| `maven.google.com` | AGP, AndroidX, Compose, ML Kit |
-| `repo1.maven.org` / `repo.maven.apache.org` | OkHttp, coroutines, JUnit |
-| `dl.google.com` | Android SDK, platform 35, build-tools |
-| `api.adoptium.net`, `cdn.azul.com` | a full JDK with `javac` |
+| Platform-neutral production/test compilation and suite (`tools/jvm-verify/run-tests.sh`) | **202 run, 202 passed, 0 failed** |
+| XML parsing (`AndroidManifest.xml` and resources) | **17 parsed, 0 malformed** |
+| Patch whitespace (`git diff --check`) | **passed** |
+| Shell syntax (`tools/ci/inspect-apks.sh`, `tools/jvm-verify/run-tests.sh`) | **passed** |
+| Standalone Kotlin syntax scan across all source files | **no parser/token errors**; unresolved Android/Compose symbols were expected without SDK dependencies |
 
-So **no Android build can run here**, with or without a JDK. The project therefore builds on
-GitHub Actions (section 4), which is also where the APK comes from.
+The offline harness excludes 11 Android/platform-integrated sources and does not replace an
+Android Gradle build. Its purpose is to execute all platform-neutral logic and tests when the
+SDK repositories are unreachable.
 
-### What *was* executed here
+## Android CI build
 
-| Check | Command | Result |
-|---|---|---|
-| Compile the platform-independent core + run the real unit tests | `tools/jvm-verify/run-tests.sh` (JDK 17.0.9 + Kotlin 2.0.21 compiler) | **191 run, 191 passed, 0 failed** |
-| XML well-formedness (all `res/**/*.xml` + the manifest) | `xml.etree` parse over 17 files | 17 parsed, 0 malformed |
-| Resource references (`@string/…`, `R.string.…`) | script over `res/` + `MainActivity.kt` | 0 missing |
-| Kotlin syntax of the Android-only files edited (`MainActivity.kt`, `AppDataStore.kt`) | `kotlinc` parse (no `android.jar` available, so unresolved references are expected) | 0 parse errors |
-| Workflow validity | `yaml.safe_load` + `bash -n` on every `run:` block of both workflows | YAML OK; all run blocks parse |
-| Release keystore | `keytool -genkeypair` (RSA 4096, PKCS12, valid to 2056) | created, gitignored, never committed |
+GitHub Actions run [`37224652485`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37224652485)
+on application-source commit `8e16da4` passed. `.github/workflows/build-apk.yml` ran these as
+four independent commands, and every command succeeded:
 
-Toolchain used for the above (both reachable from this sandbox):
-
-```bash
-python3 -m venv /tmp/venv && /tmp/venv/bin/pip install jdk4py==17.0.9.2   # JDK 17 + keytool
-npm install --prefix /tmp/kt kotlin-compiler@2.0.21                        # kotlinc 2.0.21
-export JAVA_HOME=/tmp/venv/lib/python3.11/site-packages/jdk4py/java-runtime
-export KOTLIN_COMPILER_JAR=/tmp/kt/node_modules/kotlin-compiler/lib/kotlin-compiler.jar
-./tools/jvm-verify/run-tests.sh
+```text
+./gradlew clean           -> success
+./gradlew test            -> success
+./gradlew assembleDebug   -> success
+./gradlew assembleRelease -> success
 ```
 
-`jdk4py` ships a **JRE** (no `javac`), which is enough for `kotlinc` and `keytool` but not for
-`apksigner`/Gradle.
+It then ran `tools/ci/inspect-apks.sh` on every generated APK. The inspection records:
 
----
+- package, version code/name, minimum SDK, target SDK, and launchable activity;
+- every merged requested permission;
+- complete merged manifest and activities/services/receivers/providers with exported state,
+  binding permission, and foreground-service type;
+- exact APK byte size and SHA-256;
+- `apksigner verify --verbose --print-certs`, signature-scheme results, and signing certificate
+  subject/issuer/SHA-256.
 
-## 3. What has not been verified, and why
+## Signing expectations
 
-* **No APK was built locally.** No Android SDK, no Maven access, no Gradle distribution.
-* **No APK was installed on a device or emulator.** This sandbox has no device, no emulator
-  and no Android SDK, so `adb install` and app launch could not be exercised. Nothing in this
-  repository claims otherwise.
-* **The APK binaries could not be downloaded into this sandbox** either: release assets and
-  Actions artifacts are served from `release-assets.githubusercontent.com` /
-  `pipelines.actions.githubusercontent.com`, which are blocked here (only the GitHub JSON API
-  and git protocol work). The APK is therefore inspected by CI, on the runner, where the
-  artifact exists — see section 4 — and the user downloads it from the run page or the
-  release.
+No private key is committed. If release-signing secrets are absent, the expected outputs are:
 
----
+- a debug APK signed with the CI debug key; and
+- an **unsigned** release APK, which is build output but is not installable/distributable until
+  signed with a stable protected production/upload key.
 
-## 4. Where the APK facts come from now
+If signing secrets are configured, both variants use that configured key and CI checks that the
+release output is not named unsigned. A valid signature does not guarantee Play Protect or
+Google Play approval.
 
-Both workflows contain a `Verify the APKs and publish the inspection report` step. For every
-APK it writes `dist/BUILD-REPORT.txt` containing:
+In run `37224652485`, no release key was configured:
 
-* the exact path, byte size and **SHA-256**;
-* `aapt2 dump badging`: package name, `versionCode`, `versionName`, `minSdkVersion`,
-  `targetSdkVersion`, application label, launchable activity, **every requested
-  permission**;
-* `apkanalyzer manifest print` (fallback: `aapt2 dump xmltree`): the **merged manifest** —
-  every activity/service/receiver/provider, its `android:exported`, service permissions and
-  `foregroundServiceType`;
-* `apksigner verify --verbose --print-certs`: which signature schemes verify (v1/v2/v3) and
-  the signing certificate (subject, issuer, SHA-256).
+- debug: 54,593,693 bytes; APK SHA-256
+  `645497000542632695deb534728bd0f0bdd22cddb9899cf4027521b2a7f0b92b`; v2 signature verified;
+  ephemeral debug-certificate SHA-256
+  `e4b71bfd292bf263cf39211d89d8ccef906880e1982ff00ee76ba1fa4f4e7740`;
+- release output: 44,792,881 bytes; APK SHA-256
+  `0b9b15120f76ac572e875404d828d3539c56ad2a760b89de1bf62b1a5335faf8`; unsigned;
+  `apksigner` exit 1 (`DOES NOT VERIFY`, missing `META-INF/MANIFEST.MF`).
 
-The same text is published as a check-run annotation (so it is readable from the API without
-downloading anything) and in the run's step summary, and the file is uploaded with the
-artifacts and attached to GitHub Releases.
+See [`AUDIT_REPORT.md`](AUDIT_REPORT.md) for the complete permissions and component inventory.
 
-Practical result: the release workflow **fails** if a signing key is configured but Gradle
-produced `app-release-unsigned.apk`, so an unsigned release can no longer be published by
-accident, and the debug APK now reports whether it carries the release certificate or a
-throwaway CI debug certificate.
+## Device testing
 
----
-
-## 5. Build history
-
-| Run | Conclusion | Notes |
-|---|---|---|
-| `37203761613` | failure | first real compile: 10 Kotlin errors in the Android-only layers |
-| `37204047302`, `37204240461` | failure | workflow learned to republish Gradle errors as annotations |
-| `37204716488` | **success** | compile clean, 191/191 unit tests, debug 55.7 MB + unsigned release 44.8 MB |
-| `37205108074` | **success** | tag `v1.0.0` → Release with `LiveReply-1.0.0-debug.apk`, `-release-unsigned.apk`, `SHA256SUMS.txt` |
-| [`37208498054`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37208498054) | **success** | commit `5b391f4`: permission audit (`QUERY_ALL_PACKAGES` removed), mandatory first-run disclosure, release signing configuration, CI APK inspection. 191/191 tests; debug APK + *unsigned* release APK. |
-| [`37209101295`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209101295) | **success** | commit `04027d0`: the inspection report is published as check-run annotations; the API's 4096-character cap was discovered here. |
-| [`37209329105`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209329105) | **success** | commit `2362616`: one component annotation per APK. |
-| [`37209593395`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209593395) | **success** | tag `v1.0.1` → Release with `LiveReply-1.0.1-debug.apk` (signed with a throwaway CI debug key), `LiveReply-1.0.1-release-unsigned.apk`, `SHA256SUMS.txt`, `BUILD-REPORT.txt` and the `apk-*.txt` inspection files. |
-
-The release APK in every one of those runs is unsigned, because the four signing secrets are
-not configured on the repository yet. Setting them (see `signing/README.md`, or run
-`tools/signing/print-ci-secret-commands.sh`) makes Gradle sign both build types with the
-release key, and the release workflow then refuses to publish an unsigned release at all.
-
-The APK has never been *run*: no device or emulator has been involved in any run, so runtime
-behaviour of the accessibility, overlay and capture layers remains unproven on hardware. The
-logic they call is the tested core (191 tests).
+No APK from this change has been installed on a physical Android device in this audit. No
+emulator runtime test has been performed either. Accessibility event delivery, third-party chat
+UI matching, Android's MediaProjection confirmation/`FLAG_SECURE` behavior, overlay behavior,
+foreground-service lifecycle, and STOP teardown therefore still require instrumented/manual
+validation on supported Android versions and representative chat apps.

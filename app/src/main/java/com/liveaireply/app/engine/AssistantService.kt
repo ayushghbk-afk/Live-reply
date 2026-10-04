@@ -1,15 +1,14 @@
 package com.liveaireply.app.engine
 
-import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import androidx.lifecycle.LifecycleService
 import com.liveaireply.app.notifications.MonitoringNotifier
 import com.liveaireply.app.overlay.OverlayController
 import com.liveaireply.app.settings.AppSettings
-import com.liveaireply.app.settings.AssistantMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -17,14 +16,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
- * Foreground service that owns the assistant for as long as the user wants it on.
+ * User-controlled foreground assistant.
  *
- * Android 14+ requires a declared foreground service type; `specialUse` is the honest
- * classification for "an accessibility-driven assistant with an overlay", and the
- * manifest declares the matching subtype property and permission.
+ * The service does not start work in onCreate and is not sticky. ACTION_START is accepted
+ * only after disclosure acceptance, explicit monitoring opt-in, and a connected
+ * AccessibilityService. Overlay attachment additionally requires both the in-app toggle
+ * and Android's draw-over-other-apps grant.
  */
 class AssistantService : LifecycleService() {
 
@@ -33,29 +32,43 @@ class AssistantService : LifecycleService() {
     private var overlay: OverlayController? = null
     private var settingsJob: Job? = null
     private var started = false
+    private var foreground = false
 
     override fun onCreate() {
         super.onCreate()
-        notifier = MonitoringNotifier(this)
-        notifier?.createChannel()
-        startAsForeground()
-        if (AssistantRuntime.overlayState.value.status != AssistantStatus.STOPPED) {
-            startAssistant()
-        }
+        notifier = MonitoringNotifier(this).apply { createChannel() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
-            ACTION_START -> startAssistant()
-            ACTION_PAUSE -> AssistantRuntime.engine?.pauseAll("Paused from the notification")
-            ACTION_RESUME -> AssistantRuntime.engine?.resume()
-            ACTION_STOP -> {
-                AssistantRuntime.engine?.stopAll("Stopped from the notification")
-                stopSelfSafely()
+            ACTION_START -> {
+                val settings = AssistantRuntime.requireContainer(applicationContext).currentSettings
+                if (!mayStart(settings)) {
+                    AssistantRuntime.publishError(
+                        "Assistant not started",
+                        "Accept the disclosure, enable Accessibility, and turn Monitoring on."
+                    )
+                    stopSelfSafely()
+                } else {
+                    startAsForeground()
+                    startAssistant()
+                }
             }
+
+            ACTION_PAUSE -> AssistantRuntime.engine?.pauseAll("Paused from the notification")
+            ACTION_RESUME -> {
+                val settings = AssistantRuntime.requireContainer(applicationContext).currentSettings
+                if (mayStart(settings)) {
+                    startAsForeground()
+                    if (!started) startAssistant() else AssistantRuntime.engine?.resume()
+                }
+            }
+
+            ACTION_STOP -> EmergencyStopController.stopNow(this, "Stopped from the notification")
+            else -> stopSelfSafely()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent): IBinder? {
@@ -63,9 +76,15 @@ class AssistantService : LifecycleService() {
         return null
     }
 
+    private fun mayStart(settings: AppSettings): Boolean =
+        settings.acknowledgedCapabilities && settings.monitoringEnabled &&
+            !settings.emergencyStopped && !AssistantRuntime.emergencyStopRequested &&
+            AssistantRuntime.automation != null
+
     private fun startAsForeground() {
-        val notification = notifier?.build(appLabel(null), "Starting") ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (foreground) return
+        val notification = notifier?.build(appLabel(null), "Monitoring enabled by you") ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 MonitoringNotifier.NOTIFICATION_ID,
                 notification,
@@ -74,6 +93,7 @@ class AssistantService : LifecycleService() {
         } else {
             startForeground(MonitoringNotifier.NOTIFICATION_ID, notification)
         }
+        foreground = true
     }
 
     private fun startAssistant() {
@@ -86,22 +106,21 @@ class AssistantService : LifecycleService() {
             val settings = container.settingsRepository.settings.first()
             container.currentSettings = settings
             container.eventLog.debugEnabled = settings.debugLogging
-
-            val automationController = AssistantRuntime.automation
-            if (automationController == null) {
-                container.eventLog.log(
-                    "Accessibility service is not connected yet; waiting for events",
-                    "lifecycle",
-                    com.liveaireply.app.engine.LogSeverity.WARN
-                )
+            if (!mayStart(settings)) {
+                stopSelfSafely()
+                return@launch
             }
 
+            val automationController = AssistantRuntime.automation ?: run {
+                stopSelfSafely()
+                return@launch
+            }
             val pauses = DataStoreConversationPauses(container)
             val host = EngineHostAndroid(context) { stopSelfSafely() }
             val engine = ReplyEngine(
                 detector = container.conversationDetector(),
                 pipeline = container.replyPipeline(),
-                automation = automationController ?: UnavailableAutomation,
+                automation = automationController,
                 host = host,
                 settingsProvider = { container.currentSettings },
                 personaProvider = { container.personaRepository.selected() },
@@ -110,21 +129,33 @@ class AssistantService : LifecycleService() {
             AssistantRuntime.engine = engine
             engine.start(settings)
 
-            overlay?.detach()
-            if (settings.overlayEnabled) {
-                overlay = OverlayController(context, scope).also { it.attach() }
-            }
-
+            updateOverlay(settings)
             settingsJob?.cancel()
             settingsJob = scope.launch {
                 container.settingsRepository.settings.collect { latest ->
                     container.currentSettings = latest
                     container.eventLog.debugEnabled = latest.debugLogging
+                    if (!mayStart(latest)) {
+                        stopSelfSafely()
+                        return@collect
+                    }
                     notifier?.update(appLabel(latest), statusLine())
-                    if (!latest.overlayEnabled) overlay?.detach() else overlay?.attach()
+                    updateOverlay(latest)
                 }
             }
             notifier?.update(appLabel(settings), statusLine())
+        }
+    }
+
+    private fun updateOverlay(settings: AppSettings) {
+        val allowed = settings.acknowledgedCapabilities && settings.overlayEnabled &&
+            settings.monitoringEnabled && !settings.emergencyStopped &&
+            Settings.canDrawOverlays(this)
+        if (allowed) {
+            if (overlay == null) overlay = OverlayController(applicationContext, scope)
+            overlay?.attach()
+        } else {
+            overlay?.detach()
         }
     }
 
@@ -148,7 +179,10 @@ class AssistantService : LifecycleService() {
     private fun stopSelfSafely() {
         overlay?.detach()
         settingsJob?.cancel()
-        stopForeground(true)
+        if (foreground) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            foreground = false
+        }
         stopSelf()
     }
 
@@ -158,21 +192,6 @@ class AssistantService : LifecycleService() {
         scope.cancel()
         AssistantRuntime.shutdown()
         super.onDestroy()
-    }
-
-    /** Used before the accessibility service has connected. */
-    private object UnavailableAutomation : com.liveaireply.app.automation.AutomationController {
-        override fun hasComposer() = false
-        override fun composerConfidence() = 0f
-        override fun composerContent(): String? = null
-        override fun insertText(text: String, simulateTyping: Boolean, charsPerSecond: Int) =
-            com.liveaireply.app.automation.InsertResult.failed("Accessibility service is not enabled")
-        override fun clearComposer() = false
-        override fun sendComposer() = com.liveaireply.app.automation.SendResult.failed("Accessibility service is not enabled")
-        override fun sendConfidence() = 0f
-        override fun usesGestureFallback() = false
-        override fun foregroundPackage(): String? = null
-        override fun chatTitle(): String? = null
     }
 
     /** "Pause this chat" list backed by settings storage. */

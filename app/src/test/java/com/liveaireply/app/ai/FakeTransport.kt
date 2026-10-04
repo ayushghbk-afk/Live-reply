@@ -56,6 +56,7 @@ class FakeProvider(
 
     val outcomes = ArrayDeque<AiOutcome>()
     val requests = ArrayList<AiCompletionRequest>()
+    var onComplete: (() -> Unit)? = null
 
     fun replyWith(text: String) {
         outcomes += AiOutcome.Success(text, "fake-model", 42L, 100)
@@ -67,6 +68,7 @@ class FakeProvider(
 
     override fun complete(request: AiCompletionRequest): AiOutcome {
         requests += request
+        onComplete?.invoke()
         return when {
             outcomes.size > 1 -> outcomes.removeFirst()
             outcomes.size == 1 -> outcomes.first()

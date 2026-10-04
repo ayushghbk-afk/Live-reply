@@ -11,6 +11,8 @@ import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Handler
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.liveaireply.app.settings.OcrRegion
@@ -19,30 +21,43 @@ import com.liveaireply.app.settings.OcrRegion
  * Single-frame screen capture for the OCR fallback.
  *
  * This is deliberately not a continuous capture loop: one frame per OCR request, then
- * the virtual display is released. The screenshot is processed locally and discarded;
- * it is only kept if the user turned on diagnostic logging.
+ * the virtual display is released. The screenshot is processed locally, never written to
+ * storage, and discarded immediately whether or not recognition succeeds.
  */
-class ScreenCaptureController(private val context: Context) {
+class ScreenCaptureController(
+    private val context: Context,
+    private val onProjectionStopped: () -> Unit = {}
+) {
 
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            releaseDisplay()
+            projection = null
+            onProjectionStopped()
+        }
+    }
 
     val isReady: Boolean get() = projection != null
 
     fun attach(resultCode: Int, data: Intent) {
         release()
         val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projection = manager.getMediaProjection(resultCode, data)
+        projection = manager.getMediaProjection(resultCode, data)?.also {
+            // Required by modern Android before createVirtualDisplay; it also ensures a
+            // user/system revocation tears down ImageReader immediately.
+            it.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
+        }
     }
 
     fun release() {
-        runCatching { virtualDisplay?.release() }
-        runCatching { imageReader?.close() }
-        runCatching { projection?.stop() }
-        virtualDisplay = null
-        imageReader = null
+        releaseDisplay()
+        val active = projection
         projection = null
+        runCatching { active?.unregisterCallback(projectionCallback) }
+        runCatching { active?.stop() }
     }
 
     private fun metrics(): DisplayMetrics {
@@ -55,7 +70,9 @@ class ScreenCaptureController(private val context: Context) {
 
     /**
      * Captures one frame, optionally cropped to the app's saved region, and returns the
-     * bitmap. Returns null when capture is unavailable (permission revoked, DRM screen).
+     * bitmap. Returns null when capture is unavailable or protected content produces no
+     * capturable frame. Android omits FLAG_SECURE layers; this code does not attempt an
+     * alternate source or workaround.
      */
     @SuppressLint("WrongConstant")
     fun captureFrame(region: OcrRegion?): Bitmap? {
@@ -122,11 +139,9 @@ class ScreenCaptureController(private val context: Context) {
         val width = pixels.width.coerceAtMost(source.width - left)
         val height = pixels.height.coerceAtMost(source.height - top)
         if (width <= 1 || height <= 1) return source
-        return Bitmap.createBitmap(source, left, top, width, height)
+        val cropped = Bitmap.createBitmap(source, left, top, width, height)
+        if (cropped !== source) source.recycle()
+        return cropped
     }
 
-    fun projectionIntent(): Intent {
-        val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        return manager.createScreenCaptureIntent()
-    }
 }

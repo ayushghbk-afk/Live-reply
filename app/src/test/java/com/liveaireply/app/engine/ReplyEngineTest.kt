@@ -121,6 +121,7 @@ class ReplyEngineTest {
     private var settings = AppSettings(
         mode = AssistantMode.SUGGEST,
         monitoringEnabled = true,
+        acknowledgedCapabilities = true,
         primaryModel = "test-model",
         replyDelay = ReplyDelay.INSTANT,
         // The fixtures use a fake chat package; it has to be in the enabled list.
@@ -215,6 +216,26 @@ class ReplyEngineTest {
         provider.replyWith("Yep.")
         engine.handleSnapshot(incoming("Coming?"))
         assertEquals(listOf(3_000L), sleeper.delays)
+    }
+
+    @Test
+    fun disablingAutoWhileGenerationIsInFlightPreventsSend() {
+        settings = autoSettings()
+        provider.replyWith("Yep.")
+        provider.onComplete = {
+            settings = settings.copy(
+                mode = AssistantMode.SUGGEST,
+                autoReplyEnabled = false,
+                acknowledgedAutomationRisk = false
+            )
+        }
+
+        val result = engine.handleSnapshot(incoming("Coming?"))
+
+        assertTrue("expected Suggested, got $result", result is EngineResult.Suggested)
+        assertEquals(0, automation.sendCount)
+        assertTrue(automation.inserted.isEmpty())
+        assertEquals("Yep.", engine.state().replyText)
     }
 
     @Test

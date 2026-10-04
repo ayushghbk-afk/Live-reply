@@ -77,6 +77,10 @@ SDK 35 come preinstalled on `ubuntu-latest`):
 | **Build APK** | `.github/workflows/build-apk.yml` | every push, every pull request, manual *Run workflow* | `dist/LiveReply-<version>-debug.apk` + `-release-unsigned.apk` as the **live-ai-reply-apk-…** artifact on the run page |
 | **Release APK** | `.github/workflows/release-apk.yml` | pushing a `v*` tag, or manual *Run workflow* with a tag | a GitHub **Release** with the APKs + `SHA256SUMS.txt` attached |
 
+A build of `main` is already published — grab it from the
+[Releases page](https://github.com/ayushghbk-afk/Live-reply/releases/latest)
+(`LiveReply-1.0.0-debug.apk`, signed and installable) and skip the build entirely.
+
 Getting a runnable APK without any local Android SDK:
 
 1. Push your branch, or open **Actions → Build APK → Run workflow**.
@@ -292,8 +296,9 @@ Tests run: 191, passed: 191
 
 ## 17. Known limitations
 
-- Cannot build/run here without the Android SDK; the Gradle build has not been executed
-  in this environment (see `BUILD_NOTES.md`).
+- The Gradle build cannot run in the development sandbox (no Android SDK), so it is
+  executed on GitHub Actions instead — see `BUILD_NOTES.md` and section 4. The CI build
+  compiles clean and passes all 191 unit tests; the APK has not been run on a device.
 - No conversation database: history is opt-in and kept in memory by default.
 - OCR bubble grouping is heuristic; low-confidence scans never trigger Auto mode.
 - Multi-window / split-screen layouts are not specifically handled.

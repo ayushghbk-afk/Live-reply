@@ -111,11 +111,14 @@ for apk in "$@"; do
   {
     echo "$name"
     printf '%s\n' "$component_lines" | awk '
-      /^  (meta-data|property)/ { next }
+      # permissions and <queries> have their own annotation; meta-data and properties are
+      # library plumbing and stay in dist/BUILD-REPORT.txt.
+      /^  (meta-data|property|uses-permission|uses-sdk|queries|package)/ { next }
       /^  (activity|activity-alias|service|receiver|provider)/ {
         if ($0 ~ /com\.liveaireply\.app/ || $0 ~ /exported=true/ || $0 ~ /permission=/) print "  " $0
         next
       }
+      /^  manifest/ { next }
       { print "  " $0 }
     '
     echo ""
@@ -134,7 +137,17 @@ publish() {
 }
 publish "APK identity, signing certificate and SHA-256" "$identity"
 publish "APK permissions (built artifact)" "$permissions"
-publish "APK components (app-owned, exported or permission-protected)" "$components_summary"
+
+# One annotation per APK for the components: a single 4 KB message cannot hold both, and a
+# truncated component list is worse than none.
+awk -v dir=dist '
+  /^[^ ].*\.apk$/ { if (out) close(out); out = dir "/annotation-components-" ++n ".txt" }
+  out { print >> out }
+' "$components_summary"
+for f in dist/annotation-components-*.txt; do
+  [ -s "$f" ] || continue
+  publish "APK components: $(head -n1 "$f")" "$f"
+done
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {

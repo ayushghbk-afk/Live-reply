@@ -1,0 +1,214 @@
+# Builds the APK on GitHub - no local Android SDK required.
+#
+# Runs on every push, every pull request and on demand ("Run workflow" in the Actions
+# tab). It runs the unit tests, assembles the debug + release APKs and uploads them as
+# downloadable artifacts on the run page.
+#
+# Pushing a tag like v1.0.0 is handled by release-apk.yml, which also attaches the APKs
+# to a GitHub Release.
+name: Build APK
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['**'] # tags are built and published by release-apk.yml
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push to the same branch cancels the build that is still running for it.
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    name: Assemble the debug and release APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK (platform 35, build-tools 35.0.0)
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle (dependency + build cache)
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          # Only the default branch refills the cache; other refs just read it.
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          add-job-summary: 'on-failure'
+
+      - name: Show the SDK that is in use
+        run: |
+          set -euo pipefail
+          echo "JAVA_HOME=${JAVA_HOME:-}"
+          java -version
+          sdkmanager --version
+          ./gradlew --version
+
+      - name: Prepare the debug signing key
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          if [ -n "${DEBUG_KEYSTORE_BASE64:-}" ]; then
+            printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$HOME/.android/debug.keystore"
+            echo "Using the debug keystore provided by the ANDROID_DEBUG_KEYSTORE_BASE64 secret."
+          else
+            keytool -genkeypair -noprompt \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "Generated a fresh debug keystore."
+            echo "Set the ANDROID_DEBUG_KEYSTORE_BASE64 secret to reuse one signing key"
+            echo "across builds, so an installed APK can be updated in place."
+          fi
+
+      - name: Run the unit tests and build the APKs
+        id: build
+        # --continue lets assembleDebug/assembleRelease finish even if a test fails, so
+        # the APKs are always uploaded; the "Fail the job if..." step at the end still
+        # turns a test failure into a red build. `tee` keeps the log for the next step.
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./gradlew --continue --stacktrace --console=plain \
+            testDebugUnitTest \
+            assembleDebug \
+            assembleRelease 2>&1 | tee gradle-build.log
+
+      - name: Publish the build errors as annotations
+        if: steps.build.outcome == 'failure'
+        run: |
+          set +e
+          set -o pipefail
+          if [ ! -f gradle-build.log ]; then
+            echo "::error title=No build log::gradle-build.log was not created - see the build step above."
+            exit 0
+          fi
+          {
+            grep -n -E "^(e:|w: .*(error|Error)|FAILURE:|\* What went wrong|Execution failed|> Task .*FAILED|Caused by:|Unresolved reference|Could not (resolve|find|download|create|open)|No such (file|property|method)|error: )" gradle-build.log | head -n 300
+            echo '----- last 80 lines of the build log -----'
+            tail -n 80 gradle-build.log
+          } > build-failure.txt
+          echo "extracted $(wc -l < build-failure.txt) diagnostic lines"
+          # Everything as one annotation first (GitHub keeps only the first 10 error
+          # annotations per step, so the complete text has to travel in a single one),
+          # then the most useful lines individually for the run page.
+          printf '::error title=Full build diagnostics::%s\n' \
+            "$(tr -d '\r' < build-failure.txt | head -c 55000 | sed 's/%/%25/g' | sed -z 's/\n/%0A/g')"
+          i=0
+          while IFS= read -r line; do
+            i=$((i + 1))
+            [ "$i" -gt 9 ] && break
+            printf '::error title=Gradle failure::%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-1000)"
+          done < build-failure.txt
+          {
+            echo '### Gradle failure output'
+            echo ''
+            echo '```text'
+            head -n 150 build-failure.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: Collect the APKs
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          version="$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "App version: ${version}"
+          for apk in app/build/outputs/apk/*/*.apk; do
+            [ -e "$apk" ] || continue
+            # app/build/outputs/apk/debug/app-debug.apk -> LiveReply-1.0.0-debug.apk
+            suffix="$(basename "$apk" .apk)"
+            suffix="${suffix#app-}"
+            out="dist/LiveReply-${version}-${suffix}.apk"
+            cp -f "$apk" "$out"
+            echo "collected $out"
+          done
+          if [ -d dist ] && ls dist/*.apk >/dev/null 2>&1; then
+            ( cd dist && sha256sum ./*.apk > SHA256SUMS.txt )
+            ls -lh dist
+          else
+            echo "::warning title=No APK produced::Gradle did not produce an APK - see the build log above."
+          fi
+
+      - name: Write the job summary
+        if: always()
+        run: |
+          {
+            echo "## Live AI Reply - APK build"
+            echo ""
+            if [ "${{ steps.build.outcome }}" = "success" ]; then
+              echo "- Unit tests + APK build: **passed**"
+            else
+              echo "- Unit tests + APK build: **failed** (see the annotations and the step log)"
+            fi
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo ""
+            if ls dist/*.apk >/dev/null 2>&1; then
+              echo "### Artifacts in \`dist/\`"
+              echo ""
+              echo '| File | Size | SHA-256 |'
+              echo '|---|---|---|'
+              for f in dist/*.apk; do
+                size="$(du -h "$f" | cut -f1)"
+                sum="$(sha256sum "$f" | cut -d' ' -f1)"
+                echo "| \`$(basename "$f")\` | ${size} | \`${sum:0:16}…\` |"
+              done
+              echo ""
+              echo "Download the **live-ai-reply-apk** artifact at the bottom of this page,"
+              echo "unzip it and install the \`-debug.apk\` (it is signed and installable)."
+            else
+              echo "No APK was produced - check the build log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the APKs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-ai-reply-apk-${{ github.sha }}
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 30
+          # APKs are already compressed - don't waste time zipping them again.
+          compression-level: 0
+
+      - name: Upload the unit test report and the build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-report-${{ github.sha }}
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            gradle-build.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Fail the job if the build or the tests failed
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "::error title=Build or tests failed::See the annotations above, the 'Run the unit tests and build the APKs' step log, or the unit-test-report artifact."
+          exit 1

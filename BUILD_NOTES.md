@@ -35,6 +35,41 @@ Bugs the tests caught and that were fixed:
 - `ReplySanitizer.limitEmojis` walked UTF-16 chars and split surrogate pairs, so emoji
   limiting never worked.
 
+## Build automation added (this is where the Gradle build runs)
+
+`./gradlew assembleDebug` cannot run in this sandbox (no JDK, no Android SDK, every
+Google/Maven host blocked - see below), so the build is delegated to GitHub Actions,
+which does have the toolchain:
+
+- `.github/workflows/build-apk.yml` - tests + `assembleDebug` + `assembleRelease` on every
+  push and pull request, uploads the APKs as a downloadable artifact.
+- `.github/workflows/release-apk.yml` - on a `v*` tag, signs the release APK with the
+  keystore from repository secrets (if configured) and attaches everything to a GitHub
+  Release.
+
+The YAML was validated locally (`yaml.safe_load`) and every `run:` block passes
+`bash -n`.
+
+### Result: the build is green
+
+| Run | Conclusion | Notes |
+|---|---|---|
+| `37203761613` | failure | first real compile ever: 10 Kotlin errors in the Android-only layers |
+| `37204047302`, `37204240461` | failure | error list verified; workflow learned to republish Gradle errors as annotations |
+| `37204716488` | **success** | compile clean, **191/191 unit tests pass**, debug APK 55.7 MB + release APK 44.8 MB |
+| `37205108074` | **success** | tag `v1.0.0` → Release with `LiveReply-1.0.0-debug.apk`, `LiveReply-1.0.0-release-unsigned.apk`, `SHA256SUMS.txt` |
+
+So the Android-specific layers now **are** compiler-verified, which is what the list
+below was waiting for. The errors the first compile caught (all fixed):
+
+- `MainActivity`: `clickable` is a `Modifier` extension, not a standalone function;
+  `ContextCompat` has no `requestPermissions()` (it is `ActivityCompat`).
+- `OverlayController`: `ViewTreeLifecycleOwner` is in `androidx.lifecycle`, and since
+  Lifecycle 2.6 the Kotlin API is the `View.setViewTreeLifecycleOwner()` extension
+  (`lifecycle-runtime-ktx` is empty as of 2.8; the APIs live in `lifecycle-runtime`).
+- `SettingsRepository`: `JsonValue.dbl()` takes `Double` defaults, not `Float`; and
+  `encodeList()` returns a `String`, so it needs `.toJson()` inside `jsonObj()`.
+
 ## Not executed here, and why
 
 **`./gradlew assembleDebug` was never run.** This sandbox has no Android toolchain and no
@@ -62,9 +97,11 @@ The real `gradle/wrapper/gradle-wrapper.jar` (43,504 bytes, Gradle v8.9.0) and t
 repository via the GitHub API and are committed, so `./gradlew` works as soon as the
 machine has network access to `services.gradle.org`.
 
-Therefore: **the Android-specific layers are unverified by a compiler.** They are
+**Update:** the Android-specific layers are no longer unverified. They are
 `accessibility/`, `ocr/`, `overlay/`, `notifications/`, `di/`, `storage/AppDataStore`,
 `security/SecureCredentialStore`, `settings/SettingsRepository`, `personas/DataStorePersonaRepository`,
-`ai/openai/OkHttpTransport`, `engine/AssistantService`, `ui/` and `MainActivity`. Expect
-to fix straightforward signature/import issues on the first Gradle build; the logic they
-call is the tested core.
+`ai/openai/OkHttpTransport`, `engine/AssistantService`, `ui/` and `MainActivity` — and all
+of them now compile on the GitHub Actions runner (see "Result: the build is green" above).
+The only caveat left is that the APK has never been *run*: no device or emulator and no
+instrumented tests were involved, so runtime behaviour of the Android layers is still
+unproven. The logic they call is the tested core.

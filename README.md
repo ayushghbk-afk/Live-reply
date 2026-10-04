@@ -67,6 +67,55 @@ Set the SDK location either in `local.properties` (`sdk.dir=/path/to/Android/sdk
 
 APK output: `app/build/outputs/apk/debug/app-debug.apk`
 
+### Build the APK on GitHub (nothing to install locally)
+
+Two GitHub Actions workflows do the whole build on a GitHub runner (JDK 17 + Android
+SDK 35 come preinstalled on `ubuntu-latest`):
+
+| Workflow | File | Runs on | Produces |
+|---|---|---|---|
+| **Build APK** | `.github/workflows/build-apk.yml` | every push, every pull request, manual *Run workflow* | `dist/LiveReply-<version>-debug.apk` + `-release-unsigned.apk` as the **live-ai-reply-apk-…** artifact on the run page |
+| **Release APK** | `.github/workflows/release-apk.yml` | pushing a `v*` tag, or manual *Run workflow* with a tag | a GitHub **Release** with the APKs + `SHA256SUMS.txt` attached |
+
+A build of `main` is already published — grab it from the
+[Releases page](https://github.com/ayushghbk-afk/Live-reply/releases/latest)
+(`LiveReply-1.0.0-debug.apk`, signed and installable) and skip the build entirely.
+
+Getting a runnable APK without any local Android SDK:
+
+1. Push your branch, or open **Actions → Build APK → Run workflow**.
+2. Open the finished run and download the **live-ai-reply-apk-\<sha\>** artifact (a zip).
+3. Unzip it and copy `LiveReply-<version>-debug.apk` to the phone, then tap it to install.
+   The debug APK is signed, so it installs directly. `adb install -r` works too.
+
+The job runs `./gradlew testDebugUnitTest assembleDebug assembleRelease --continue`, so the
+APKs are uploaded even when a unit test fails — but the job is still marked red in that
+case. The run page summary lists each APK with its size and SHA-256.
+
+Publishing a versioned release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0     # -> Release APK workflow -> GitHub Release with the APKs
+```
+
+#### Optional repository secrets
+
+Set these under **Settings → Secrets and variables → Actions** (none are required to get
+a debug APK):
+
+| Secret | Effect |
+|---|---|
+| `ANDROID_DEBUG_KEYSTORE_BASE64` | Reuses one debug signing key across runs, so a new debug APK updates the installed app in place instead of failing with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Generate with `base64 -w0 ~/.android/debug.keystore`. |
+| `ANDROID_KEYSTORE_BASE64` | Your own release keystore (`base64 -w0 my-release.keystore`). When present, the release APK is `zipalign`ed and signed with `apksigner` and published as `LiveReply-<version>-release.apk`. |
+| `ANDROID_KEYSTORE_PASSWORD` | Keystore password. |
+| `ANDROID_KEY_ALIAS` | Key alias inside the keystore. |
+| `ANDROID_KEY_PASSWORD` | Key password (defaults to the keystore password). |
+
+Without `ANDROID_KEYSTORE_BASE64` the release APK is attached **unsigned** (the Gradle
+release build type has no `signingConfig`, by design) and the debug APK is the
+installable one. No API key or model id is ever baked into a CI build.
+
 ### Offline verification (no Android SDK required)
 
 The platform-independent core (detection, adapters, prompt building, validation,
@@ -247,8 +296,9 @@ Tests run: 191, passed: 191
 
 ## 17. Known limitations
 
-- Cannot build/run here without the Android SDK; the Gradle build has not been executed
-  in this environment (see `BUILD_NOTES.md`).
+- The Gradle build cannot run in the development sandbox (no Android SDK), so it is
+  executed on GitHub Actions instead — see `BUILD_NOTES.md` and section 4. The CI build
+  compiles clean and passes all 191 unit tests; the APK has not been run on a device.
 - No conversation database: history is opt-in and kept in memory by default.
 - OCR bubble grouping is heuristic; low-confidence scans never trigger Auto mode.
 - Multi-window / split-screen layouts are not specifically handled.

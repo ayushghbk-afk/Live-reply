@@ -28,6 +28,12 @@
 Android requires it on the exported accessibility service declaration so only the system can
 bind that service.
 
+The inspected merged APK has one additional generated declaration/use:
+`com.liveaireply.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`. AndroidX Core adds this
+app-signature permission to protect dynamically registered, not-exported receivers on older
+Android versions. It grants no device-data capability and cannot be held by an app signed with
+a different certificate.
+
 ### Removed / deliberately absent
 
 The prior manifest's seven package-visibility `<queries>` entries were removed because no code
@@ -137,7 +143,8 @@ Direct production dependencies retained and used:
 - AndroidX DataStore — local non-secret settings;
 - Kotlin coroutines — lifecycle/background work and flows;
 - OkHttp — selected AI endpoint transport;
-- Google ML Kit text recognition — on-device optional OCR; and
+- Google ML Kit text recognition — on-device optional OCR; its separate Google operational
+  metrics collection is disclosed in the privacy/Data Safety documents; and
 - JUnit (test scope only) — JVM unit tests.
 
 Removed as unused: Navigation Compose, Material Icons Core, Compose tooling/preview,

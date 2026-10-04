@@ -76,8 +76,10 @@ Accessibility service does not start monitoring.
   numbers, CVVs, bank-account values, and authentication codes.
 - Cleartext network traffic is disabled; requests go to the user-configured endpoint.
 - The API key is Android-Keystore encrypted and excluded from backup.
-- No advertising, analytics, SMS, contacts, phone, location, storage, microphone, camera,
-  notification-listener, broad package-query, or app-install permission is declared.
+- No advertising, app-added general analytics, SMS, contacts, phone, location, storage,
+  microphone, camera, notification-listener, broad package-query, or app-install permission is
+  declared. Google ML Kit's operational metrics collection is disclosed separately in the
+  privacy policy and Data Safety working sheet.
 
 ## User control and stopping
 

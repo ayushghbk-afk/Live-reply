@@ -13,8 +13,9 @@ changes made by the distributor.
 | User content — OCR frame | Locally processed only, after one-shot Android confirmation | Optional accessibility fallback | ML Kit on-device; in memory; immediately recycled; never sent or stored |
 | App activity — enabled/excluded package names and settings | Yes, locally | App functionality and privacy controls | Stored in private DataStore; excluded from backup |
 | Authentication information — AI API key | Yes, user enters it | Authenticate to selected AI provider | AES-GCM ciphertext locally; key in Android Keystore; plaintext used only for request authorization; excluded from backup |
-| Diagnostics | Yes, locally and ephemerally | App functionality/troubleshooting | Bounded process-memory buffer; secret-redacted; never uploaded; not persisted |
-| Device or other IDs | No app-generated analytics/advertising IDs | — | No analytics or advertising SDK |
+| Diagnostics | Yes, locally and ephemerally | App functionality/troubleshooting | Bounded process-memory buffer; secret-redacted; not uploaded by Live AI Reply; not persisted |
+| ML Kit operational metrics | Yes, by the Google ML Kit SDK | Diagnostics and usage analytics | Device/app information, per-installation identifier, performance, API configuration, feature input/output size and version; Google states HTTPS in transit and no third-party sharing; OCR pixels/text/results stay on-device |
+| Device or other IDs | Yes, ML Kit per-installation identifier | ML Kit diagnostics and usage analytics | Not intended by Google to identify a user or physical device; no advertising ID or app-added developer analytics ID |
 | Contacts, SMS, call logs, phone | No | — | No permission/API |
 | Location | No | — | No permission/API |
 | Photos/files/storage | No | — | No storage permission; OCR frame is not a user file and is never written |
@@ -31,6 +32,9 @@ because the endpoint is selected by the user.
 
 Recommended conservative review posture:
 
+- declare the current ML Kit SDK's operational collection under the current Play categories
+  that cover device/app information, identifiers, diagnostics, and analytics, based on Google's
+  latest official worksheet: <https://developers.google.com/ml-kit/android-data-disclosure>;
 - declare **User content / Messages or other in-app communications** as processed for **App
   functionality**;
 - disclose that processing is ephemeral in this app but provider retention depends on the
@@ -52,7 +56,8 @@ Recommended conservative review posture:
 - Backups/device transfer exclude preferences, files, and databases.
 - Users can clear their API key, clear diagnostics, clear Android app data, or uninstall.
 - No account creation exists in this app; provider accounts are external.
-- No analytics, ad network, or developer conversation backend is present.
+- No ad network, app-added general analytics SDK, or developer conversation backend is present;
+  Google ML Kit's separately disclosed operational metrics collection is present.
 
 ## Play Console permission declarations
 

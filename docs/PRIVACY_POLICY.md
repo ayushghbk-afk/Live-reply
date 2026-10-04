@@ -97,20 +97,30 @@ global STOP action is used. The app's overlay itself is marked `FLAG_SECURE`.
 - Android backup and device-transfer rules exclude all app preferences, files, and databases.
 - Conversation screenshots are never stored.
 - The current app has no persistent conversation-history store.
-- Diagnostics are held in a bounded in-memory buffer, are not uploaded, and pass through secret
-  redaction. They disappear when the process ends or the user clears them.
+- Diagnostics are held in a bounded in-memory buffer, are not uploaded by Live AI Reply, and
+  pass through secret redaction. They disappear when the process ends or the user clears them.
 - Cleartext HTTP traffic is disabled in the app manifest.
+
+On-device OCR uses Google's standalone ML Kit SDK. Google states that OCR input pixels, text,
+and resulting output are processed on-device and are not sent to Google. ML Kit does send
+operational metrics to Google, including device/app information, a per-installation identifier,
+performance, API configuration, feature input/output size, and feature version, for diagnostics
+and usage analytics. Google states this metrics data is encrypted in transit and is not shared
+with third parties. See Google's current disclosures:
+<https://developers.google.com/ml-kit/android-data-disclosure> and
+<https://developers.google.com/ml-kit/terms>.
 
 The chosen AI provider may retain request data according to its own policy; users must review
 that provider's settings and terms.
 
 ## Sharing, sale, and advertising
 
-This implementation does not sell personal data, use it for advertising, or include advertising
-or analytics SDKs. Conversation text is disclosed only to the AI endpoint selected by the user
-for the user-requested reply-generation function. The direct dependencies are AndroidX UI and
-lifecycle libraries, Android DataStore, Kotlin coroutines, OkHttp, and on-device Google ML Kit
-text recognition.
+This implementation does not sell personal data, use it for advertising, or include an ad SDK
+or a general-purpose developer analytics SDK. Conversation text is disclosed only to the AI
+endpoint selected by the user for the user-requested reply-generation function. Google ML Kit
+processes OCR input/output on-device but separately sends the operational metrics described
+above to Google. The direct dependencies are AndroidX UI and lifecycle libraries, Android
+DataStore, Kotlin coroutines, OkHttp, and on-device Google ML Kit text recognition.
 
 ## User controls and deletion
 

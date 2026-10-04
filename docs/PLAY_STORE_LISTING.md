@@ -40,8 +40,10 @@ Accessibility Service is the core feature used to read visible conversation text
 names you enable and identify the composer and a labelled Send control. It does not filter key
 events or dispatch coordinate gestures. The floating assistant is optional and off by default.
 Optional OCR is an accessibility fallback: each one-shot frame requires Android's normal screen
-capture confirmation, is recognized on-device, and is immediately discarded. Screenshots are
-never uploaded. Android's `FLAG_SECURE` protection is honored without workarounds.
+capture confirmation, is recognized on-device, and is immediately discarded. Screenshots and
+recognized text are never uploaded by OCR. Google ML Kit separately sends operational
+SDK/device/app/performance metrics to Google as described in the privacy policy. Android's
+`FLAG_SECURE` protection is honored without workarounds.
 
 **Immediate STOP**
 

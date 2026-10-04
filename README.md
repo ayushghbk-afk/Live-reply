@@ -100,9 +100,16 @@ OCR is off by default and is only an accessibility fallback:
    captures one cropped frame, recognizes it on-device with ML Kit, recycles the bitmap, releases
    the virtual display/projection, and stops the capture foreground service.
 
-A fresh fallback requires fresh Android confirmation. Pixels are never written to disk or
-uploaded. Android excludes `FLAG_SECURE` content from MediaProjection; no workaround or alternate
-capture path exists. The app's own floating overlay is also marked `FLAG_SECURE`.
+A fresh fallback requires fresh Android confirmation. Pixels and recognized text are never
+written to disk or uploaded by OCR. Android excludes `FLAG_SECURE` content from MediaProjection;
+no workaround or alternate capture path exists. The app's own floating overlay is also marked
+`FLAG_SECURE`.
+
+Google states that ML Kit does not send OCR input or resulting output to its servers. The SDK
+does send operational metrics (device/app information, a per-installation identifier,
+performance, API configuration, feature input/output size, and feature version) to Google for
+diagnostics and usage analytics. See the [privacy policy](docs/PRIVACY_POLICY.md) and [Data Safety
+working sheet](docs/DATA_SAFETY.md).
 
 ## Optional overlay
 
@@ -133,7 +140,7 @@ Restarting requires a deliberate Monitoring action. Auto requires a fresh opt-in
 
 ## Permissions
 
-The source manifest and final merged APK should contain these seven `<uses-permission>` entries:
+The source manifest declares these seven `<uses-permission>` entries:
 
 | Permission | Why retained |
 |---|---|
@@ -146,7 +153,10 @@ The source manifest and final merged APK should contain these seven `<uses-permi
 | `SYSTEM_ALERT_WINDOW` | Optional user-controlled floating assistant |
 
 `BIND_ACCESSIBILITY_SERVICE` is specified on the accessibility service so only Android can bind
-it; it is not a requested app permission.
+it; it is not a requested app permission. The AndroidX manifest merger additionally generates
+`com.liveaireply.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` and requests that app-signature
+permission to protect AndroidX runtime receivers on older platform versions. It grants no access
+to device data and is present in the inspected merged APK.
 
 Not declared: `QUERY_ALL_PACKAGES`, `MANAGE_EXTERNAL_STORAGE`, `REQUEST_INSTALL_PACKAGES`, SMS,
 contacts, phone, location, storage, camera, microphone, notification-listener, device-admin,

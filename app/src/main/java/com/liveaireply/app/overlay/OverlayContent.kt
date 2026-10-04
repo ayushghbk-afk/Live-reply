@@ -1,0 +1,204 @@
+package com.liveaireply.app.overlay
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.liveaireply.app.engine.AssistantRuntime
+import com.liveaireply.app.engine.AssistantStatus
+import com.liveaireply.app.engine.OverlayAction
+import com.liveaireply.app.engine.OverlayState
+import com.liveaireply.app.ui.theme.LiveReplyTheme
+
+/**
+ * The floating control. Collapsed it is a status dot; expanded it is the suggestion card
+ * from the specification, with a large STOP AI button always reachable.
+ */
+@Composable
+fun OverlayContent() {
+    val state by AssistantRuntime.overlayState.collectAsState()
+    val settings = AssistantRuntime.container?.currentSettings
+    val scale = (settings?.overlayScale ?: 1f).coerceIn(0.7f, 1.6f)
+    val alpha = (settings?.overlayOpacity ?: 0.95f).coerceIn(0.4f, 1f)
+
+    LiveReplyTheme {
+        Box(modifier = Modifier.padding(4.dp)) {
+            if (state.expanded) {
+                ExpandedCard(state = state, scale = scale, alpha = alpha)
+            } else {
+                CollapsedDot(state = state, scale = scale, alpha = alpha)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollapsedDot(state: OverlayState, scale: Float, alpha: Float) {
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
+    Surface(
+        shape = CircleShape,
+        color = statusColor(state.status).copy(alpha = alpha),
+        modifier = Modifier
+            .size((44 * scale).dp)
+            .pointerInput(Unit) {
+                detectDragGestures { change, drag ->
+                    change.consume()
+                    offsetX += drag.x
+                    offsetY += drag.y
+                }
+            }
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                text = state.status.glyph,
+                color = Color.White,
+                fontSize = (16 * scale).sp
+            )
+        }
+    }
+    if (offsetX != 0f || offsetY != 0f) {
+        androidx.compose.runtime.LaunchedEffect(offsetX, offsetY) {
+            AssistantRuntime.container?.let {
+                val current = it.currentSettings.overlayPosition
+                // Persist the drag only when the finger settles.
+                kotlinx.coroutines.delay(600)
+                AssistantRuntime.publishOverlay(state)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
+    var edited by remember(state.replyText) { mutableStateOf(state.replyText.orEmpty()) }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = alpha),
+        tonalElevation = 3.dp,
+        modifier = Modifier.padding(4.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(12.dp)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "${state.status.glyph}  Live AI Reply",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = state.status.label,
+                    color = statusColor(state.status),
+                    fontSize = 12.sp
+                )
+            }
+
+            Text(text = state.statusDetail, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(text = "Mode: ${state.mode.label}", fontSize = 12.sp)
+            state.currentAppLabel?.let { Text(text = "App: $it", fontSize = 12.sp) }
+
+            state.latestIncomingText?.let {
+                Text(text = "Latest message:", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(text = "\u201C$it\u201D", fontSize = 13.sp)
+            }
+
+            state.errorMessage?.let {
+                Text(text = it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+            }
+
+            if (state.hasSuggestion) {
+                Text(text = "AI reply:", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (state.replyEditable) {
+                    OutlinedTextField(
+                        value = edited,
+                        onValueChange = { edited = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = MaterialTheme.typography.bodyMedium
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(text = "\u201C${state.replyText}\u201D", fontSize = 13.sp)
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(onClick = { act(OverlayAction.EDIT) }) { Text("Edit") }
+                    OutlinedButton(onClick = { act(OverlayAction.REGENERATE) }) { Text("Regen") }
+                    Button(
+                        onClick = { act(OverlayAction.SEND, edited) },
+                        enabled = state.canSend
+                    ) { Text("Send") }
+                }
+                state.sendBlockedReason?.let {
+                    Text(text = it, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = { act(OverlayAction.COPY, edited) }) { Text("Copy") }
+                    TextButton(onClick = { act(OverlayAction.REJECT) }) { Text("Reject") }
+                    TextButton(onClick = { act(OverlayAction.PAUSE_CHAT) }) { Text("Pause chat") }
+                }
+            }
+
+            // The emergency control is always visible and always the loudest thing here.
+            Button(
+                onClick = { act(OverlayAction.STOP) },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("STOP AI", fontWeight = FontWeight.Bold) }
+
+            TextButton(onClick = { act(OverlayAction.TOGGLE_EXPAND) }) { Text("Collapse") }
+        }
+    }
+}
+
+private fun act(action: OverlayAction, edited: String? = null) {
+    AssistantRuntime.engine?.handleAction(action, edited?.takeIf { it.isNotBlank() })
+}
+
+private fun statusColor(status: AssistantStatus): Color = when (status) {
+    AssistantStatus.MONITORING -> Color(0xFF2E7D32)
+    AssistantStatus.THINKING -> Color(0xFFF9A825)
+    AssistantStatus.REPLY_READY -> Color(0xFF1565C0)
+    AssistantStatus.ERROR -> Color(0xFFC62828)
+    AssistantStatus.PAUSED -> Color(0xFF6D4C41)
+    AssistantStatus.STOPPED -> Color(0xFF424242)
+    AssistantStatus.IDLE -> Color(0xFF546E7A)
+}

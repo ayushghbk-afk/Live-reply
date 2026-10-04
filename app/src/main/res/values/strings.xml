@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Live AI Reply</string>
+    <string name="stop_ai">STOP AI</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_resume">Resume</string>
+    <string name="action_stop">Stop</string>
+    <string name="notification_channel_name">Assistant monitoring</string>
+    <string name="notification_channel_description">Shows while Live AI Reply is watching for new messages. Use Stop to switch it off.</string>
+    <string name="accessibility_service_summary">Reads the chat on screen so Live AI Reply can draft a reply.</string>
+    <string name="accessibility_service_description">Live AI Reply uses this service to read the conversation that is currently open in another chat app, to find the message input box, and to type a reply you have approved. It never reads password or PIN fields, it skips banking and authenticator apps, and it stops immediately when you press STOP AI. Nothing is recorded; the text is only sent to the AI endpoint you configure.</string>
+</resources>

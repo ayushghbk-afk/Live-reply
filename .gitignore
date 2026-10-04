@@ -12,3 +12,13 @@ local.properties
 *.aab
 *.keystore
 !debug.keystore
+
+# ---------------------------------------------------------------------------
+# Signing material - a private key must never be committed. See signing/README.md
+# ---------------------------------------------------------------------------
+keystore.properties
+/signing/*.keystore
+/signing/*.jks
+/signing/*.p12
+/signing/*.properties
+/signing/*.pem

@@ -32,6 +32,7 @@ class AppDataStore(private val context: Context) {
         val AUTO_REPLY_ENABLED = booleanPreferencesKey("auto_reply_enabled")
         val EMERGENCY_STOPPED = booleanPreferencesKey("emergency_stopped")
         val ACKNOWLEDGED_AUTOMATION_RISK = booleanPreferencesKey("acknowledged_automation_risk")
+        val ACKNOWLEDGED_CAPABILITIES = booleanPreferencesKey("acknowledged_capabilities")
 
         val DEBOUNCE_MS = longPreferencesKey("debounce_ms")
         val POLLING_INTERVAL_MS = longPreferencesKey("polling_interval_ms")

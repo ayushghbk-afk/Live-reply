@@ -1,17 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Accessibility service configuration.
+  Accessibility service configuration - the exact capabilities this service asks Android
+  for, and nothing more.
 
-  Deliberately conservative: content-changed and window-state events only, a 100ms
-  notification timeout (the app debounces further in code), no key event filtering and
-  no touch exploration. Gestures are enabled only so an explicitly user configured
-  coordinate fallback can be performed.
+  * Event types: window state changes, window content changes and view text changes. That
+    is what "a new message appeared / the user typed" looks like; nothing else is
+    requested (no key events, no touch exploration, no gesture observation).
+  * canRetrieveWindowContent: required to read the visible conversation.
+  * canPerformGestures: only used for the coordinate fallback that the user must configure
+    explicitly for a specific app (see the automation guard); it is not used to drive the
+    UI on its own.
+  * flagRetrieveInteractiveWindows / flagIncludeNotImportantViews / flagReportViewIds: the
+    chat bubbles and the composer are frequently not "important" views and are only
+    identifiable by view id, so extraction needs all three.
+  * canRequestFilterKeyEvents is explicitly false: this app never wants to observe typing
+    key by key.
+  * The description and summary strings state precisely what is read and what can be typed
+    - see res/values/strings.xml.
+
+  isAccessibilityTool is declared explicitly as false (also the platform default): this app
+  is a conversation assistant, NOT a tool for people with disabilities, so it must not
+  claim that designation. Google Play Protect warns users when an app sets it to true
+  without being a disability-support tool, and setting it here would be deceptive.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewTextChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds"
     android:canPerformGestures="true"
+    android:isAccessibilityTool="false"
     android:canRetrieveWindowContent="true"
     android:canRequestFilterKeyEvents="false"
     android:description="@string/accessibility_service_description"

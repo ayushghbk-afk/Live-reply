@@ -196,24 +196,46 @@ private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigat
 private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: () -> Unit) {
     val context = LocalContext.current
     var key by remember { mutableStateOf("") }
-    SectionCard(title = "1. Welcome") {
+
+    // The disclosure comes first and cannot be skipped: the sensitive capabilities are
+    // stated in plain language before any permission is requested, and "Finish setup" stays
+    // disabled until the user has acknowledged them (tracked by
+    // AppSettings.acknowledgedCapabilities, which is also recorded in preferences).
+    SectionCard(title = "1. ${context.getString(R.string.disclosure_title)}") {
+        Text(
+            text = context.getString(R.string.disclosure_accessibility),
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(context.getString(R.string.disclosure_accessibility_scope), fontSize = 12.sp)
+        Text(context.getString(R.string.disclosure_overlay), fontSize = 12.sp)
+        Text(context.getString(R.string.disclosure_foreground), fontSize = 12.sp)
+        Text(context.getString(R.string.disclosure_screen_capture), fontSize = 12.sp)
+        Text(context.getString(R.string.disclosure_network), fontSize = 12.sp)
+        SwitchRow(
+            label = context.getString(R.string.disclosure_acknowledge),
+            checked = settings.acknowledgedCapabilities,
+            onChecked = { viewModel.update { s -> s.copy(acknowledgedCapabilities = it) } }
+        )
+    }
+    SectionCard(title = "2. Welcome") {
         Text("Live AI Reply reads the chat you have open, drafts a reply with your AI, and " +
             "shows it in a floating bubble. Nothing is sent unless you allow it.")
     }
-    SectionCard(title = "2. Accessibility permission") {
+    SectionCard(title = "3. Accessibility permission") {
         Text("Needed to read the conversation and to type the reply. Without it the app cannot see any chat.")
         OutlinedButton(onClick = { openAccessibilitySettings(context) }) { Text("Open Accessibility settings") }
     }
-    SectionCard(title = "3. Screen capture / OCR") {
-        Text("Optional. Used only when a chat does not expose text through Accessibility. " +
-            "Screenshots are processed on the device and discarded.")
+    SectionCard(title = "4. Screen capture / OCR") {
+        Text("Optional and off by default. Used only when a chat does not expose text through " +
+            "Accessibility: one frame is captured after you approve Android's MediaProjection " +
+            "dialog, recognised on this device, and then discarded. Screenshots are never uploaded.")
         SwitchRow(
             label = "Enable OCR fallback",
             checked = settings.ocrEnabled,
             onChecked = { viewModel.update { s -> s.copy(ocrEnabled = it) } }
         )
     }
-    SectionCard(title = "4. AI provider") {
+    SectionCard(title = "5. AI provider") {
         OutlinedTextField(
             value = settings.baseUrl,
             onValueChange = { viewModel.update { s -> s.copy(baseUrl = it) } },
@@ -229,7 +251,7 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
         Button(onClick = { viewModel.saveApiKey(key); key = "" }) { Text("Save key") }
         Button(onClick = { viewModel.testConnection() }) { Text("Test connection") }
     }
-    SectionCard(title = "5. Model") {
+    SectionCard(title = "6. Model") {
         OutlinedTextField(
             value = settings.primaryModel,
             onValueChange = { viewModel.update { s -> s.copy(primaryModel = it) } },
@@ -238,7 +260,7 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
         )
         OutlinedButton(onClick = { viewModel.fetchModels() }) { Text("Fetch models") }
     }
-    SectionCard(title = "6. Persona") {
+    SectionCard(title = "7. Persona") {
         PersonaPresets.ALL.forEach { persona ->
             ChoiceRow(
                 label = persona.label,
@@ -248,7 +270,7 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
             )
         }
     }
-    SectionCard(title = "7. Mode") {
+    SectionCard(title = "8. Mode") {
         AssistantMode.entries.forEach { mode ->
             ChoiceRow(
                 label = mode.label,
@@ -258,12 +280,24 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
             )
         }
     }
-    SectionCard(title = "8. Test") {
-        Button(onClick = {
-            viewModel.testConnection()
-            viewModel.update { it.copy(setupCompleted = true) }
-            onDone()
-        }, modifier = Modifier.fillMaxWidth()) { Text("Finish setup") }
+    SectionCard(title = "9. Test") {
+        Button(onClick = { viewModel.testConnection() }) { Text("Test connection") }
+        Button(
+            onClick = {
+                viewModel.testConnection()
+                viewModel.update { it.copy(setupCompleted = true) }
+                onDone()
+            },
+            enabled = settings.acknowledgedCapabilities,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Finish setup") }
+        if (!settings.acknowledgedCapabilities) {
+            Text(
+                text = context.getString(R.string.disclosure_required),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
     }
 }
 
@@ -620,16 +654,15 @@ private fun PermissionsScreen(viewModel: AppViewModel) {
             )
         }) { Text("Allow notifications") }
     }
+    // Battery optimisation: this opens the system list, where the user can set the app to
+    // Unrestricted. The app deliberately does NOT request the restricted
+    // REQUEST_IGNORE_BATTERY_OPTIMIZATIONS permission (and therefore cannot show the
+    // one-tap exempt dialog) - that permission is not needed for the feature to work and
+    // Play restricts it to a narrow set of app types.
     OutlinedButton(onClick = {
-        runCatching {
-            context.startActivity(
-                Intent(
-                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                    android.net.Uri.parse("package:${context.packageName}")
-                )
-            )
-        }
-    }) { Text("Ignore battery optimisation") }
+        runCatching { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+    }) { Text("Battery optimisation settings") }
+    Text(text = context.getString(R.string.disclosure_battery), fontSize = 11.sp)
 }
 
 @Composable

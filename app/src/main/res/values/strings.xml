@@ -7,6 +7,29 @@
     <string name="action_stop">Stop</string>
     <string name="notification_channel_name">Assistant monitoring</string>
     <string name="notification_channel_description">Shows while Live AI Reply is watching for new messages. Use Stop to switch it off.</string>
-    <string name="accessibility_service_summary">Reads the chat on screen so Live AI Reply can draft a reply.</string>
-    <string name="accessibility_service_description">Live AI Reply uses this service to read the conversation that is currently open in another chat app, to find the message input box, and to type a reply you have approved. It never reads password or PIN fields, it skips banking and authenticator apps, and it stops immediately when you press STOP AI. Nothing is recorded; the text is only sent to the AI endpoint you configure.</string>
+
+    <!--
+      Accessibility service text.
+
+      `accessibility_service_summary` is the one-line entry in the accessibility settings
+      list; `accessibility_service_description` is what the user reads before enabling the
+      service (and behind the "Learn more"/info button on newer Android versions). Both
+      must describe exactly what the service does - no vagueness, no marketing wording.
+    -->
+    <string name="accessibility_service_summary">Reads the visible chat on screen and, when you allow it, types and sends replies for you.</string>
+    <string name="accessibility_service_description">Live AI Reply uses this accessibility service to read the text of the conversation that is currently visible on screen, to find the message input box, and - only when you switch on Approve or Auto mode - to type a suggested reply into that box and press the app\'s Send control.\n\nWhat it can see: while the service is enabled, Android delivers window and text-change events from the app in the foreground, so the service is technically able to read any app\'s visible screen. Live AI Reply only processes the chat apps you switch on in "Supported apps", and it skips password, PIN, OTP and card fields, banking and authenticator apps, and any package you add to the excluded list. It does not use the service to change settings, to bypass Android security prompts, or to accept permissions or payments for you.\n\nWhat it sends: the recent visible chat lines (the number is your "context" setting) and your prompt are sent to the AI endpoint you configure and nowhere else. Nothing is recorded, and nothing is sent while the assistant is stopped.\n\nScreen capture is separate and off by default: the optional OCR fallback asks for Android\'s MediaProjection consent, captures a single frame, recognises the text on this device, and then discards the image.\n\nYou can stop everything at any time with the STOP AI control in the app, the overlay, or the persistent notification, or by switching this service off in Android settings.</string>
+    <string name="accessibility_service_learn_more">Live AI Reply is a conversation assistant, not an accessibility tool for people with disabilities. Android will therefore treat this service as a non-accessibility tool and ask you to confirm enabling it.</string>
+
+    <!-- First-run disclosure. `disclosure_accessibility` is deliberately one explicit
+         sentence; the surrounding strings describe each sensitive capability separately. -->
+    <string name="disclosure_title">What this app does and what it can access</string>
+    <string name="disclosure_accessibility">This app uses Android Accessibility Service to read visible chat text and, when enabled, enter/send replies in supported chat applications.</string>
+    <string name="disclosure_accessibility_scope">The service is technically able to view the visible screen of any app. Live AI Reply only processes the chat apps you enable, skips password / PIN / OTP / card fields, banking and authenticator apps, and never touches anything on your excluded list. It does not change system settings, dismiss security prompts, or accept permissions, payments or messages on your behalf.</string>
+    <string name="disclosure_overlay">"Display over other apps": the floating control and the reply card are drawn on top of the chat app so you can read, edit, regenerate, send or reject a suggestion without switching apps.</string>
+    <string name="disclosure_foreground">A foreground service keeps the assistant running while you are in another app. It always shows a persistent notification with Pause and Stop, and it stops when you press STOP AI.</string>
+    <string name="disclosure_screen_capture">Screen capture / OCR (optional, off by default): if you turn on the OCR fallback, the app asks Android for MediaProjection consent and captures one frame of the screen when a chat does not expose its text through accessibility. The frame is recognised on this device with on-device text recognition and is then discarded - screenshots are never uploaded, stored, or sent to the AI provider.</string>
+    <string name="disclosure_network">Messages are sent over the network only to the AI endpoint you configure. The API key is encrypted with a key held in this device\'s Android Keystore and is never logged or backed up.</string>
+    <string name="disclosure_acknowledge">I have read and understood what this app can access</string>
+    <string name="disclosure_required">Read the disclosure above and tick the box to continue.</string>
+    <string name="disclosure_battery">Battery optimisation: the app opens the system battery settings instead of asking for the restricted "ignore battery optimisations" permission. Set Live AI Reply to Unrestricted there if Android is killing the service.</string>
 </resources>

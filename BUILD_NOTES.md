@@ -140,7 +140,15 @@ throwaway CI debug certificate.
 | `37204047302`, `37204240461` | failure | workflow learned to republish Gradle errors as annotations |
 | `37204716488` | **success** | compile clean, 191/191 unit tests, debug 55.7 MB + unsigned release 44.8 MB |
 | `37205108074` | **success** | tag `v1.0.0` → Release with `LiveReply-1.0.0-debug.apk`, `-release-unsigned.apk`, `SHA256SUMS.txt` |
-| this branch | see the run page | permission audit (`QUERY_ALL_PACKAGES` removed), first-run disclosure, release signing, CI APK inspection |
+| [`37208498054`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37208498054) | **success** | commit `5b391f4`: permission audit (`QUERY_ALL_PACKAGES` removed), mandatory first-run disclosure, release signing configuration, CI APK inspection. 191/191 tests; debug APK + *unsigned* release APK. |
+| [`37209101295`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209101295) | **success** | commit `04027d0`: the inspection report is published as check-run annotations; the API's 4096-character cap was discovered here. |
+| [`37209329105`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209329105) | **success** | commit `2362616`: one component annotation per APK. |
+| [`37209593395`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209593395) | **success** | tag `v1.0.1` → Release with `LiveReply-1.0.1-debug.apk` (signed with a throwaway CI debug key), `LiveReply-1.0.1-release-unsigned.apk`, `SHA256SUMS.txt`, `BUILD-REPORT.txt` and the `apk-*.txt` inspection files. |
+
+The release APK in every one of those runs is unsigned, because the four signing secrets are
+not configured on the repository yet. Setting them (see `signing/README.md`, or run
+`tools/signing/print-ci-secret-commands.sh`) makes Gradle sign both build types with the
+release key, and the release workflow then refuses to publish an unsigned release at all.
 
 The APK has never been *run*: no device or emulator has been involved in any run, so runtime
 behaviour of the accessibility, overlay and capture layers remains unproven on hardware. The

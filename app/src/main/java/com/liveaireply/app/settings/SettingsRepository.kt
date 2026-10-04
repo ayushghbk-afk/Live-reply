@@ -220,10 +220,10 @@ class SettingsRepository(
             runCatching {
                 out[key] = OcrRegion(
                     packageName = key,
-                    leftFraction = value.dbl("l", 0f).toFloat(),
-                    topFraction = value.dbl("t", 0.18f).toFloat(),
-                    rightFraction = value.dbl("r", 1f).toFloat(),
-                    bottomFraction = value.dbl("b", 0.84f).toFloat()
+                    leftFraction = value.dbl("l", 0.0).toFloat(),
+                    topFraction = value.dbl("t", 0.18).toFloat(),
+                    rightFraction = value.dbl("r", 1.0).toFloat(),
+                    bottomFraction = value.dbl("b", 0.84).toFloat()
                 )
             }
         }
@@ -240,8 +240,8 @@ class SettingsRepository(
                     "titleId" to (value.titleViewId ?: "").toJson(),
                     "x" to (value.sendPoint?.x ?: -1).toJson(),
                     "y" to (value.sendPoint?.y ?: -1).toJson(),
-                    "outWords" to encodeList(value.extraOutgoingWords),
-                    "inWords" to encodeList(value.extraIncomingWords)
+                    "outWords" to encodeList(value.extraOutgoingWords).toJson(),
+                    "inWords" to encodeList(value.extraIncomingWords).toJson()
                 )
             }.toTypedArray()
         )

@@ -7,6 +7,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -36,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.liveaireply.app.adapters.ChatAdapterRegistry
 import com.liveaireply.app.accessibility.LiveReplyAccessibilityService
@@ -85,7 +87,7 @@ private fun AppRoot(viewModel: AppViewModel) {
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier
                             .padding(end = 12.dp)
-                            .let { it.then(androidx.compose.foundation.clickable { viewModel.emergencyStop() }) }
+                            .clickable { viewModel.emergencyStop() }
                     )
                 }
             )
@@ -612,7 +614,7 @@ private fun PermissionsScreen(viewModel: AppViewModel) {
     }) { Text("Grant overlay permission") }
     if (Build.VERSION.SDK_INT >= 33) {
         OutlinedButton(onClick = {
-            androidx.core.content.ContextCompat.requestPermissions(
+            ActivityCompat.requestPermissions(
                 context as android.app.Activity,
                 arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001
             )

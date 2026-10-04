@@ -7,10 +7,10 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.ViewTreeLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewTreeLifecycleOwner
 import com.liveaireply.app.engine.AssistantRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.collectLatest

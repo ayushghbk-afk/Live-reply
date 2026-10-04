@@ -6,9 +6,10 @@
 **Version:** `1.0.1` (`versionCode` 2)
 **Compile / target / minimum SDK:** 35 / 35 / 24
 
-> Artifact hashes, sizes, signing-certificate digests, and `apksigner` output are filled from
-> the reproducible build/inspection run after source validation. Source declarations alone are
-> not treated as proof of merged-APK contents.
+> Artifact hashes, sizes, signing-certificate digests, and `apksigner` output below come from the
+> identified CI build/inspection run after source validation. Source declarations alone are not
+> treated as proof of merged-APK contents; the ephemeral debug key also means later debug builds
+> will have a different signer and APK hash.
 
 ## 1. Permission audit
 
@@ -51,6 +52,8 @@ optional overlay.
 
 ## 2. Components and service declarations
 
+### App-owned components
+
 | Component | Type | Exported | Permission / type | Behavior |
 |---|---|---:|---|---|
 | `.MainActivity` | Activity | Yes | Launcher only | First-run disclosure, controls, Security & Settings |
@@ -58,12 +61,26 @@ optional overlay.
 | `.engine.AssistantService` | Foreground service | No | `specialUse` | Runs only after disclosure + Monitoring + connected Accessibility; non-sticky |
 | `.ocr.ScreenCaptureService` | Foreground service | No | `mediaProjection` | Arms only with `RESULT_OK` from Android's confirmation; consumes one frame and stops |
 
-There are no providers, activity aliases, or manifest receivers. A previously declared but
-unused internal notification receiver was removed; notification actions target the unexported
-assistant service directly.
+The source manifest has no provider, activity alias, or receiver. A previously declared but
+unused internal notification receiver was removed; notification actions target the appropriate
+unexported service directly.
 
-Expected exported components: launcher `MainActivity`, and the permission-protected
-AccessibilityService. No unprotected service is exported.
+### Dependency-added merged components
+
+| Component | Type | Exported | Binding permission / purpose |
+|---|---|---:|---|
+| `com.google.mlkit.common.internal.MlKitComponentDiscoveryService` | Service | No | ML Kit registrar discovery |
+| `com.google.mlkit.common.internal.MlKitInitProvider` | Provider | No | ML Kit initialization |
+| `com.google.android.gms.common.api.GoogleApiActivity` | Activity | No | Google API result plumbing |
+| `androidx.startup.InitializationProvider` | Provider | No | Emoji/lifecycle/profile initialization |
+| `androidx.profileinstaller.ProfileInstallReceiver` | Receiver | Yes | Protected by system signature permission `android.permission.DUMP` |
+| `com.google.android.datatransport.runtime.backends.TransportBackendDiscovery` | Service | No | ML Kit metrics transport backend discovery |
+| `com.google.android.datatransport.runtime.scheduling.jobscheduling.JobInfoSchedulerService` | Service | No | Protected by `android.permission.BIND_JOB_SERVICE` |
+| `com.google.android.datatransport.runtime.scheduling.jobscheduling.AlarmManagerSchedulerBroadcastReceiver` | Receiver | No | ML Kit metrics scheduling fallback |
+
+The complete inspected merge therefore exports the launcher activity, the system-bindable
+AccessibilityService, and AndroidX's `DUMP`-protected profile receiver. No unprotected service,
+provider, or library receiver is exported.
 
 ## 3. Accessibility implementation
 
@@ -168,4 +185,58 @@ in a sideloaded APK. Disabling Play Protect is not recommended or presented as a
 
 ## 10. Verification results
 
-_To be updated from the final build and `apksigner verify --verbose --print-certs` output._
+GitHub Actions run [`37224652485`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37224652485)
+on application-source commit `8e16da4` completed successfully. It executed the requested
+commands separately and all four returned success:
+
+```text
+./gradlew clean
+./gradlew test
+./gradlew assembleDebug
+./gradlew assembleRelease
+```
+
+The same source tree passed the offline platform-neutral suite: **202 tests run, 202 passed,
+0 failed**. XML parsing covered 17 files and `git diff --check` passed.
+
+### Debug APK
+
+| Field | Result |
+|---|---|
+| Build path | `app/build/outputs/apk/debug/app-debug.apk` |
+| Artifact name | `LiveReply-1.0.1-debug.apk` in artifact `live-ai-reply-apk-8e16da4a3ee70e67e5273cbd9e5d25492807ca18` |
+| Size | 54,593,693 bytes |
+| APK SHA-256 | `645497000542632695deb534728bd0f0bdd22cddb9899cf4027521b2a7f0b92b` |
+| `apksigner verify` | Exit 0; verifies with APK Signature Scheme v2; v1/v3/v3.1/v3.2/v4 false |
+| Signers | 1; RSA 2048 |
+| Certificate DN | `C=US, O=Android, CN=Android Debug` |
+| Certificate SHA-256 | `e4b71bfd292bf263cf39211d89d8ccef906880e1982ff00ee76ba1fa4f4e7740` |
+
+The workflow generated that debug key for this run. It is ephemeral and not a production/upload
+identity; a later CI debug build can have a different certificate and cannot update this APK.
+
+### Release build output
+
+| Field | Result |
+|---|---|
+| Build path | `app/build/outputs/apk/release/app-release-unsigned.apk` |
+| Artifact name | `LiveReply-1.0.1-release-unsigned.apk` in artifact `live-ai-reply-apk-8e16da4a3ee70e67e5273cbd9e5d25492807ca18` |
+| Size | 44,792,881 bytes |
+| APK SHA-256 | `0b9b15120f76ac572e875404d828d3539c56ad2a760b89de1bf62b1a5335faf8` |
+| `apksigner verify` | Exit 1: `DOES NOT VERIFY`; `ERROR: Missing META-INF/MANIFEST.MF` |
+| Certificate SHA-256 | None — the release output is unsigned |
+
+`assembleRelease` succeeded, but an unsigned APK is not an installable/distributable release.
+The repository has no production key by design, and no release-signing secrets were configured
+for this run. A publisher must configure its protected stable upload/app-signing key, rebuild,
+and rerun `apksigner verify --verbose --print-certs` before distribution.
+
+Both APKs report package `com.liveaireply.app`, `versionCode=2`, `versionName=1.0.1`, minimum SDK
+24, compile SDK 35, and target SDK 35. The complete merged permission and component inventories
+are recorded in sections 1 and 2 above and in the CI `BUILD-REPORT.txt` artifact.
+
+### Runtime evidence
+
+No APK was installed on a physical Android device or emulator. Runtime behavior—including the
+floating-overlay expansion fix—has therefore compiled successfully but has not been confirmed
+by a physical-device interaction test.

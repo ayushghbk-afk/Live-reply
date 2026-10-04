@@ -49,17 +49,18 @@ SDK repositories are unreachable.
 
 ## Android CI build
 
-Pending the current branch push. `.github/workflows/build-apk.yml` runs these as four independent
-commands so every requested command is attempted and logged:
+GitHub Actions run [`37224652485`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37224652485)
+on application-source commit `8e16da4` passed. `.github/workflows/build-apk.yml` ran these as
+four independent commands, and every command succeeded:
 
 ```text
-./gradlew clean
-./gradlew test
-./gradlew assembleDebug
-./gradlew assembleRelease
+./gradlew clean           -> success
+./gradlew test            -> success
+./gradlew assembleDebug   -> success
+./gradlew assembleRelease -> success
 ```
 
-It then runs `tools/ci/inspect-apks.sh` on every generated APK. The inspection records:
+It then ran `tools/ci/inspect-apks.sh` on every generated APK. The inspection records:
 
 - package, version code/name, minimum SDK, target SDK, and launchable activity;
 - every merged requested permission;
@@ -80,6 +81,18 @@ No private key is committed. If release-signing secrets are absent, the expected
 If signing secrets are configured, both variants use that configured key and CI checks that the
 release output is not named unsigned. A valid signature does not guarantee Play Protect or
 Google Play approval.
+
+In run `37224652485`, no release key was configured:
+
+- debug: 54,593,693 bytes; APK SHA-256
+  `645497000542632695deb534728bd0f0bdd22cddb9899cf4027521b2a7f0b92b`; v2 signature verified;
+  ephemeral debug-certificate SHA-256
+  `e4b71bfd292bf263cf39211d89d8ccef906880e1982ff00ee76ba1fa4f4e7740`;
+- release output: 44,792,881 bytes; APK SHA-256
+  `0b9b15120f76ac572e875404d828d3539c56ad2a760b89de1bf62b1a5335faf8`; unsigned;
+  `apksigner` exit 1 (`DOES NOT VERIFY`, missing `META-INF/MANIFEST.MF`).
+
+See [`AUDIT_REPORT.md`](AUDIT_REPORT.md) for the complete permissions and component inventory.
 
 ## Device testing
 

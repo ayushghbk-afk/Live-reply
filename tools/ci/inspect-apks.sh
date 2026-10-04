@@ -42,7 +42,8 @@ report=dist/BUILD-REPORT.txt
 identity=dist/apk-identity.txt
 permissions=dist/apk-permissions.txt
 components=dist/apk-components.txt
-: > "$report"; : > "$identity"; : > "$permissions"; : > "$components"
+components_summary=dist/apk-components-summary.txt
+: > "$report"; : > "$identity"; : > "$permissions"; : > "$components"; : > "$components_summary"
 
 manifest_dump="$(mktemp)"
 trap 'rm -f "$manifest_dump"' EXIT
@@ -103,6 +104,22 @@ for apk in "$@"; do
     printf '%s\n' "$component_lines" | sed 's/^/  /'
     echo ""
   } >> "$components"
+
+  # The annotation version keeps what a reviewer must check - the app's own components,
+  # anything exported, anything permission-protected - and drops library meta-data and
+  # non-exported plumbing, so both APKs fit in the 4 KB annotation budget.
+  {
+    echo "$name"
+    printf '%s\n' "$component_lines" | awk '
+      /^  (meta-data|property)/ { next }
+      /^  (activity|activity-alias|service|receiver|provider)/ {
+        if ($0 ~ /com\.liveaireply\.app/ || $0 ~ /exported=true/ || $0 ~ /permission=/) print "  " $0
+        next
+      }
+      { print "  " $0 }
+    '
+    echo ""
+  } >> "$components_summary"
 done
 
 cat "$report"
@@ -117,7 +134,7 @@ publish() {
 }
 publish "APK identity, signing certificate and SHA-256" "$identity"
 publish "APK permissions (built artifact)" "$permissions"
-publish "APK components (merged manifest)" "$components"
+publish "APK components (app-owned, exported or permission-protected)" "$components_summary"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {

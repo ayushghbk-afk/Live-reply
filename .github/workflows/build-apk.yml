@@ -31,24 +31,33 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up the Android SDK (platform 35, build-tools 35.0.0)
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
       - name: Set up Gradle (dependency + build cache)
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           # Only the default branch refills the cache; other refs just read it.
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          add-job-summary: 'on-failure'
+
+      - name: Show the SDK that is in use
+        run: |
+          set -euo pipefail
+          echo "JAVA_HOME=${JAVA_HOME:-}"
+          java -version
+          sdkmanager --version
+          ./gradlew --version
 
       - name: Prepare the debug signing key
         env:
@@ -75,13 +84,46 @@ jobs:
         id: build
         # --continue lets assembleDebug/assembleRelease finish even if a test fails, so
         # the APKs are always uploaded; the "Fail the job if..." step at the end still
-        # turns a test failure into a red build.
+        # turns a test failure into a red build. `tee` keeps the log for the next step.
         continue-on-error: true
         run: |
+          set -o pipefail
           ./gradlew --continue --stacktrace --console=plain \
             testDebugUnitTest \
             assembleDebug \
-            assembleRelease
+            assembleRelease 2>&1 | tee gradle-build.log
+
+      - name: Publish the build errors as annotations
+        if: steps.build.outcome == 'failure'
+        run: |
+          set +e
+          set -o pipefail
+          if [ ! -f gradle-build.log ]; then
+            echo "::error title=No build log::gradle-build.log was not created - see the build step above."
+            exit 0
+          fi
+          {
+            grep -n -E "^(e:|w: .*(error|Error)|FAILURE:|\* What went wrong|Execution failed|> Task .*FAILED|Caused by:|Unresolved reference|Could not (resolve|find|download|create|open)|No such (file|property|method)|error: )" gradle-build.log | head -n 150
+            echo '----- last 60 lines of the build log -----'
+            tail -n 60 gradle-build.log
+          } > build-failure.txt
+          echo "extracted $(wc -l < build-failure.txt) diagnostic lines"
+          # One annotation per line: visible on the run page, and readable through the
+          # API without downloading the full (and here, unreachable) job log.
+          i=0
+          while IFS= read -r line; do
+            i=$((i + 1))
+            [ "$i" -gt 40 ] && break
+            printf '::error title=Gradle failure::%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-1000)"
+          done < build-failure.txt
+          {
+            echo '### Gradle failure output'
+            echo ''
+            echo '```text'
+            head -n 150 build-failure.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Collect the APKs
         if: always()
@@ -115,7 +157,7 @@ jobs:
             if [ "${{ steps.build.outcome }}" = "success" ]; then
               echo "- Unit tests + APK build: **passed**"
             else
-              echo "- Unit tests + APK build: **failed** (see the step log)"
+              echo "- Unit tests + APK build: **failed** (see the annotations and the step log)"
             fi
             echo "- Commit: \`${{ github.sha }}\`"
             echo ""
@@ -139,7 +181,7 @@ jobs:
 
       - name: Upload the APKs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-ai-reply-apk-${{ github.sha }}
           path: |
@@ -150,19 +192,20 @@ jobs:
           # APKs are already compressed - don't waste time zipping them again.
           compression-level: 0
 
-      - name: Upload the unit test report
+      - name: Upload the unit test report and the build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unit-test-report-${{ github.sha }}
           path: |
             app/build/reports/tests/
             app/build/test-results/
+            gradle-build.log
           if-no-files-found: ignore
           retention-days: 14
 
       - name: Fail the job if the build or the tests failed
         if: steps.build.outcome == 'failure'
         run: |
-          echo "::error title=Build or tests failed::See the 'Run the unit tests and build the APKs' step above, or download the unit-test-report artifact."
+          echo "::error title=Build or tests failed::See the annotations above, the 'Run the unit tests and build the APKs' step log, or the unit-test-report artifact."
           exit 1

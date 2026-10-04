@@ -44,7 +44,7 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve the tag and the app version
         id: meta
@@ -63,18 +63,18 @@ jobs:
           echo "Publishing tag '${tag}' (app version ${version})"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up the Android SDK (platform 35, build-tools 35.0.0)
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
       - name: Set up Gradle (dependency + build cache)
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Prepare the debug signing key
         env:
@@ -96,11 +96,32 @@ jobs:
           fi
 
       - name: Run the unit tests and build the APKs
+        id: build
         run: |
+          set -o pipefail
           ./gradlew --stacktrace --console=plain \
             testDebugUnitTest \
             assembleDebug \
-            assembleRelease
+            assembleRelease 2>&1 | tee gradle-build.log
+
+      - name: Publish the build errors as annotations
+        if: failure()
+        run: |
+          set +e
+          set -o pipefail
+          [ -f gradle-build.log ] || exit 0
+          {
+            grep -n -E "^(e:|w: .*(error|Error)|FAILURE:|\* What went wrong|Execution failed|> Task .*FAILED|Caused by:|Unresolved reference|Could not (resolve|find|download|create|open)|error: )" gradle-build.log | head -n 100
+            echo '----- last 40 lines of the build log -----'
+            tail -n 40 gradle-build.log
+          } > build-failure.txt
+          i=0
+          while IFS= read -r line; do
+            i=$((i + 1))
+            [ "$i" -gt 30 ] && break
+            printf '::error title=Gradle failure::%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-1000)"
+          done < build-failure.txt
+          exit 0
 
       - name: Collect the APKs
         run: |

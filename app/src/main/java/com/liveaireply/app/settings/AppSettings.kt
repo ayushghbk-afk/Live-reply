@@ -170,7 +170,13 @@ data class AppSettings(
     val adapterOverrides: Map<String, AdapterOverrides> = emptyMap(),
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val setupCompleted: Boolean = false,
-    val acknowledgedAutomationRisk: Boolean = false
+    val acknowledgedAutomationRisk: Boolean = false,
+    /**
+     * Set when the user ticks the first-run disclosure that spells out the accessibility,
+     * overlay and screen-capture capabilities. "Finish setup" stays disabled until then; it
+     * is stored so the disclosure is a one-time acknowledgement rather than a nag.
+     */
+    val acknowledgedCapabilities: Boolean = false
 ) {
 
     fun effectiveReplyDelayMs(): Long = when (replyDelay) {

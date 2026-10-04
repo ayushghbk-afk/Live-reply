@@ -1,107 +1,155 @@
-# Build notes - what was and was not executed in this environment
+# Build notes — what was actually executed, and what was not
 
-## Executed here
+This file records the build environment honestly. It exists because "the build should work"
+is not evidence; every claim below was produced by a command whose output is quoted.
+
+---
+
+## 1. Provenance of the APK that Play Protect blocked
+
+| Question | Answer |
+|---|---|
+| Which file? | `LiveReply-1.0.0-debug.apk`, 55,703,461 bytes |
+| Produced by this repository? | **Yes.** Name and size match the `Collect the APKs` step of `.github/workflows/release-apk.yml` (`app-debug.apk` → `LiveReply-1.0.0-debug.apk`). |
+| Which run? | GitHub Actions run [`37205108074`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37205108074) — workflow **Release APK**, event `push`, tag `v1.0.0`, commit `7514cd6b1e82cc45c950a9c0024a3b6666714be`, conclusion `success`. |
+| Where from? | GitHub Release [`v1.0.0`](https://github.com/ayushghbk-afk/Live-reply/releases/tag/v1.0.0), asset `LiveReply-1.0.0-debug.apk` (uploaded 2026-10-04T13:23:15Z) together with `LiveReply-1.0.0-release-unsigned.apk` (44,751,730 bytes) and `SHA256SUMS.txt`. |
+| Was it a debug build? | **Yes.** It is the `debug` build type: `android:debuggable="true"`, `isMinifyEnabled = false`, and signed with a debug keystore that the workflow *generated inside that run* (`keytool -genkeypair … -dname "CN=Android Debug,O=Android,C=US"`), because the `ANDROID_DEBUG_KEYSTORE_BASE64` secret is not configured. |
+| Was it installable as a normal release? | No. The published "release" asset in that release is **unsigned** (`app-release-unsigned.apk`) because the Gradle release build type had no `signingConfig` and no release key was configured. |
+
+Two consequences that the user hit:
+
+1. **"App not installed" (screenshot 1).** A debug APK signed by a key generated per CI run
+   cannot replace an APK signed by a different key; Android reports
+   `INSTALL_FAILED_UPDATE_INCOMPATIBLE` and the on-device installer shows only "App not
+   installed". Installing a *second* CI debug build on top of the first therefore always
+   fails.
+2. **"App blocked to protect your device" (screenshot 2).** This one is *not* about debug vs
+   release. It is Google's automatic block for apps installed from internet-sideloading
+   sources that declare accessibility (and/or SMS / notification-listener) access — quoted
+   from [Google's developer guidance](https://developers.google.com/android/play-protect/warning-dev-guidance)
+   in README section 5.1. No permission change removes it, because accessibility *is* the
+   product.
+
+---
+
+## 2. Attempted in this environment, with the real output
+
+### `./gradlew clean`, `./gradlew test`, `./gradlew assembleDebug`
+
+All three were run (JDK 17 supplied, see below). All three fail before Gradle starts, in the
+wrapper itself:
+
+```text
+Exception in thread "main" javax.net.ssl.SSLHandshakeException: Remote host terminated the handshake
+    at java.base/sun.net.www.protocol.https.HttpsClient.afterConnect(Unknown Source)
+    at org.gradle.wrapper.Install.forceFetch(SourceFile:2)
+    at org.gradle.wrapper.Install$1.call(SourceFile:8)
+    at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+Caused by: java.io.EOFException: SSL peer shut down incorrectly
+```
+
+The wrapper cannot download `gradle-8.9-bin.zip` from `services.gradle.org`. This is a
+**network-allowlist restriction of the development sandbox**, not a defect in the project.
+Hosts reachable from here: `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`,
+`api.github.com`, `codeload.github.com`, `github.com`. Everything else the Android build needs
+is refused at TLS level (HTTP 000 / `SSL_ERROR_SYSCALL`):
+
+| Host | Needed for |
+|---|---|
+| `services.gradle.org` | the Gradle distribution itself |
+| `maven.google.com` | AGP, AndroidX, Compose, ML Kit |
+| `repo1.maven.org` / `repo.maven.apache.org` | OkHttp, coroutines, JUnit |
+| `dl.google.com` | Android SDK, platform 35, build-tools |
+| `api.adoptium.net`, `cdn.azul.com` | a full JDK with `javac` |
+
+So **no Android build can run here**, with or without a JDK. The project therefore builds on
+GitHub Actions (section 4), which is also where the APK comes from.
+
+### What *was* executed here
 
 | Check | Command | Result |
 |---|---|---|
-| Core compile (Kotlin 2.0.21, JVM target 17) | `tools/jvm-verify/run-tests.sh` | 34 core sources + 21 test sources compile clean |
-| Unit tests | `tools/jvm-verify/run-tests.sh` | **191 run, 191 passed, 0 failed** |
-| Resource XML well-formedness | `xml.etree` over `res/**` + manifest | 17 files, 0 malformed |
-| Resource reference resolution (`@string`, `@drawable`, `R.string.*`, …) | script in the session | 19 references, 0 missing |
+| Compile the platform-independent core + run the real unit tests | `tools/jvm-verify/run-tests.sh` (JDK 17.0.9 + Kotlin 2.0.21 compiler) | **191 run, 191 passed, 0 failed** |
+| XML well-formedness (all `res/**/*.xml` + the manifest) | `xml.etree` parse over 17 files | 17 parsed, 0 malformed |
+| Resource references (`@string/…`, `R.string.…`) | script over `res/` + `MainActivity.kt` | 0 missing |
+| Kotlin syntax of the Android-only files edited (`MainActivity.kt`, `AppDataStore.kt`) | `kotlinc` parse (no `android.jar` available, so unresolved references are expected) | 0 parse errors |
+| Workflow validity | `yaml.safe_load` + `bash -n` on every `run:` block of both workflows | YAML OK; all run blocks parse |
+| Release keystore | `keytool -genkeypair` (RSA 4096, PKCS12, valid to 2056) | created, gitignored, never committed |
 
-The tests are the real `app/src/test` sources executed against the real
-`app/src/main/java` production classes - no re-implementation, no stubbing of the logic
-under test. Only the JUnit 4 API surface is stubbed, in `tools/jvm-verify/junit-stub`,
-which is outside every Gradle source set.
+Toolchain used for the above (both reachable from this sandbox):
 
-Code paths actually executed by that run include `ConversationDetector.process`,
-`DuplicateGuard.markSelfReply`, `ReplyEngine.handleSnapshot/handleAction/performSend`,
-`AutomationGuard.decide`, `ReplyPipeline.generate`, `OpenAiCompatibleProvider.complete`,
-`PromptBuilder.build`, `ReplyValidator.validate`, `ReplySanitizer.sanitize/limitEmojis`,
-`BubbleExtractor.extractBubbles`, `GenericChatAdapter.locateComposer/locateSendTarget`,
-`SensitiveScreenPolicy.evaluate`, `LogRedactor.redact`, `Debouncer.*`,
-`Json.parse/stringify` and `AppSettings`.
+```bash
+python3 -m venv /tmp/venv && /tmp/venv/bin/pip install jdk4py==17.0.9.2   # JDK 17 + keytool
+npm install --prefix /tmp/kt kotlin-compiler@2.0.21                        # kotlinc 2.0.21
+export JAVA_HOME=/tmp/venv/lib/python3.11/site-packages/jdk4py/java-runtime
+export KOTLIN_COMPILER_JAR=/tmp/kt/node_modules/kotlin-compiler/lib/kotlin-compiler.jar
+./tools/jvm-verify/run-tests.sh
+```
 
-Bugs the tests caught and that were fixed:
-- `AppSettings.DEFAULT` was declared before `DEFAULT_ENABLED_PACKAGES`, so the companion
-  initialiser passed `null` into a non-null parameter (`ExceptionInInitializerError` on
-  first use).
-- `GenericChatAdapter.supports()` returned `true` unconditionally and was inherited by
-  every specialised adapter, so Instagram claimed every package.
-- `ConversationDetector` accepted `DetectionPolicy.conversationPaused` but never checked
-  it, so a paused chat would still be answered.
-- `DuplicateGuard.markSelfReply` stored a content hash while the detector compared
-  direction-aware hashes, weakening loop prevention.
-- `ReplySanitizer.limitEmojis` walked UTF-16 chars and split surrogate pairs, so emoji
-  limiting never worked.
+`jdk4py` ships a **JRE** (no `javac`), which is enough for `kotlinc` and `keytool` but not for
+`apksigner`/Gradle.
 
-## Build automation added (this is where the Gradle build runs)
+---
 
-`./gradlew assembleDebug` cannot run in this sandbox (no JDK, no Android SDK, every
-Google/Maven host blocked - see below), so the build is delegated to GitHub Actions,
-which does have the toolchain:
+## 3. What has not been verified, and why
 
-- `.github/workflows/build-apk.yml` - tests + `assembleDebug` + `assembleRelease` on every
-  push and pull request, uploads the APKs as a downloadable artifact.
-- `.github/workflows/release-apk.yml` - on a `v*` tag, signs the release APK with the
-  keystore from repository secrets (if configured) and attaches everything to a GitHub
-  Release.
+* **No APK was built locally.** No Android SDK, no Maven access, no Gradle distribution.
+* **No APK was installed on a device or emulator.** This sandbox has no device, no emulator
+  and no Android SDK, so `adb install` and app launch could not be exercised. Nothing in this
+  repository claims otherwise.
+* **The APK binaries could not be downloaded into this sandbox** either: release assets and
+  Actions artifacts are served from `release-assets.githubusercontent.com` /
+  `pipelines.actions.githubusercontent.com`, which are blocked here (only the GitHub JSON API
+  and git protocol work). The APK is therefore inspected by CI, on the runner, where the
+  artifact exists — see section 4 — and the user downloads it from the run page or the
+  release.
 
-The YAML was validated locally (`yaml.safe_load`) and every `run:` block passes
-`bash -n`.
+---
 
-### Result: the build is green
+## 4. Where the APK facts come from now
+
+Both workflows contain a `Verify the APKs and publish the inspection report` step. For every
+APK it writes `dist/BUILD-REPORT.txt` containing:
+
+* the exact path, byte size and **SHA-256**;
+* `aapt2 dump badging`: package name, `versionCode`, `versionName`, `minSdkVersion`,
+  `targetSdkVersion`, application label, launchable activity, **every requested
+  permission**;
+* `apkanalyzer manifest print` (fallback: `aapt2 dump xmltree`): the **merged manifest** —
+  every activity/service/receiver/provider, its `android:exported`, service permissions and
+  `foregroundServiceType`;
+* `apksigner verify --verbose --print-certs`: which signature schemes verify (v1/v2/v3) and
+  the signing certificate (subject, issuer, SHA-256).
+
+The same text is published as a check-run annotation (so it is readable from the API without
+downloading anything) and in the run's step summary, and the file is uploaded with the
+artifacts and attached to GitHub Releases.
+
+Practical result: the release workflow **fails** if a signing key is configured but Gradle
+produced `app-release-unsigned.apk`, so an unsigned release can no longer be published by
+accident, and the debug APK now reports whether it carries the release certificate or a
+throwaway CI debug certificate.
+
+---
+
+## 5. Build history
 
 | Run | Conclusion | Notes |
 |---|---|---|
-| `37203761613` | failure | first real compile ever: 10 Kotlin errors in the Android-only layers |
-| `37204047302`, `37204240461` | failure | error list verified; workflow learned to republish Gradle errors as annotations |
-| `37204716488` | **success** | compile clean, **191/191 unit tests pass**, debug APK 55.7 MB + release APK 44.8 MB |
-| `37205108074` | **success** | tag `v1.0.0` → Release with `LiveReply-1.0.0-debug.apk`, `LiveReply-1.0.0-release-unsigned.apk`, `SHA256SUMS.txt` |
+| `37203761613` | failure | first real compile: 10 Kotlin errors in the Android-only layers |
+| `37204047302`, `37204240461` | failure | workflow learned to republish Gradle errors as annotations |
+| `37204716488` | **success** | compile clean, 191/191 unit tests, debug 55.7 MB + unsigned release 44.8 MB |
+| `37205108074` | **success** | tag `v1.0.0` → Release with `LiveReply-1.0.0-debug.apk`, `-release-unsigned.apk`, `SHA256SUMS.txt` |
+| [`37208498054`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37208498054) | **success** | commit `5b391f4`: permission audit (`QUERY_ALL_PACKAGES` removed), mandatory first-run disclosure, release signing configuration, CI APK inspection. 191/191 tests; debug APK + *unsigned* release APK. |
+| [`37209101295`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209101295) | **success** | commit `04027d0`: the inspection report is published as check-run annotations; the API's 4096-character cap was discovered here. |
+| [`37209329105`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209329105) | **success** | commit `2362616`: one component annotation per APK. |
+| [`37209593395`](https://github.com/ayushghbk-afk/Live-reply/actions/runs/37209593395) | **success** | tag `v1.0.1` → Release with `LiveReply-1.0.1-debug.apk` (signed with a throwaway CI debug key), `LiveReply-1.0.1-release-unsigned.apk`, `SHA256SUMS.txt`, `BUILD-REPORT.txt` and the `apk-*.txt` inspection files. |
 
-So the Android-specific layers now **are** compiler-verified, which is what the list
-below was waiting for. The errors the first compile caught (all fixed):
+The release APK in every one of those runs is unsigned, because the four signing secrets are
+not configured on the repository yet. Setting them (see `signing/README.md`, or run
+`tools/signing/print-ci-secret-commands.sh`) makes Gradle sign both build types with the
+release key, and the release workflow then refuses to publish an unsigned release at all.
 
-- `MainActivity`: `clickable` is a `Modifier` extension, not a standalone function;
-  `ContextCompat` has no `requestPermissions()` (it is `ActivityCompat`).
-- `OverlayController`: `ViewTreeLifecycleOwner` is in `androidx.lifecycle`, and since
-  Lifecycle 2.6 the Kotlin API is the `View.setViewTreeLifecycleOwner()` extension
-  (`lifecycle-runtime-ktx` is empty as of 2.8; the APIs live in `lifecycle-runtime`).
-- `SettingsRepository`: `JsonValue.dbl()` takes `Double` defaults, not `Float`; and
-  `encodeList()` returns a `String`, so it needs `.toJson()` inside `jsonObj()`.
-
-## Not executed here, and why
-
-**`./gradlew assembleDebug` was never run.** This sandbox has no Android toolchain and no
-way to obtain one:
-
-- `java`, `javac`, `gradle`, `ANDROID_HOME`: absent.
-- Network egress is restricted to `registry.npmjs.org`, `pypi.org`, `api.github.com` and
-  `codeload.github.com`. Every host the Android build needs is blocked at the TLS layer
-  (verified: connection reset, `curl` exit 35 / HTTP 000):
-  - `dl.google.com` (Android SDK, platform, build-tools)
-  - `maven.google.com` (AGP, AndroidX, Compose, ML Kit)
-  - `repo1.maven.org` (OkHttp, JUnit, coroutines)
-  - `services.gradle.org` (the Gradle distribution itself)
-  - `api.adoptium.net` (JDKs)
-- `apt-get update` fails: `deb.debian.org` is blocked and `/var/lib/apt/lists` is not
-  writable without root package access.
-
-Workaround used to get a compiler at all: a JDK-less JRE 17 from the `jdk4py` PyPI wheel
-and the Kotlin 2.0.21 compiler from the `kotlin-compiler` npm package. That is enough to
-run `kotlinc` and the JVM tests, but it cannot produce an APK - `aapt2`, `d8`, the
-platform `android.jar` and every AndroidX/Compose/OkHttp/ML Kit artifact are unreachable.
-
-The real `gradle/wrapper/gradle-wrapper.jar` (43,504 bytes, Gradle v8.9.0) and the
-`gradlew`/`gradlew.bat` scripts **were** fetched from the official `gradle/gradle`
-repository via the GitHub API and are committed, so `./gradlew` works as soon as the
-machine has network access to `services.gradle.org`.
-
-**Update:** the Android-specific layers are no longer unverified. They are
-`accessibility/`, `ocr/`, `overlay/`, `notifications/`, `di/`, `storage/AppDataStore`,
-`security/SecureCredentialStore`, `settings/SettingsRepository`, `personas/DataStorePersonaRepository`,
-`ai/openai/OkHttpTransport`, `engine/AssistantService`, `ui/` and `MainActivity` — and all
-of them now compile on the GitHub Actions runner (see "Result: the build is green" above).
-The only caveat left is that the APK has never been *run*: no device or emulator and no
-instrumented tests were involved, so runtime behaviour of the Android layers is still
-unproven. The logic they call is the tested core.
+The APK has never been *run*: no device or emulator has been involved in any run, so runtime
+behaviour of the accessibility, overlay and capture layers remains unproven on hardware. The
+logic they call is the tested core (191 tests).

@@ -1,7 +1,57 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+}
+
+// ---------------------------------------------------------------------------------
+// Signing
+//
+// A release key is read from (in this order):
+//   1. keystore.properties in the repository root - gitignored, never commit it
+//   2. environment variables, which is what CI uses:
+//        LIVEREPLY_KEYSTORE_FILE      path to the .jks / .keystore / .p12 file
+//        LIVEREPLY_KEYSTORE_PASSWORD  keystore password
+//        LIVEREPLY_KEY_ALIAS          key alias inside the keystore
+//        LIVEREPLY_KEY_PASSWORD       key password (falls back to the keystore password)
+//
+// With no key configured the build still works: `assembleRelease` produces an *unsigned*
+// app-release-unsigned.apk, and the configuration message below says so. Nothing is
+// faked and no key is ever committed or generated into the source tree.
+// ---------------------------------------------------------------------------------
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        FileInputStream(keystorePropertiesFile).use { load(it) }
+    }
+}
+
+fun signingValue(property: String, environment: String): String? =
+    (keystoreProperties.getProperty(property) ?: System.getenv(environment))
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+val releaseStoreFilePath = signingValue("storeFile", "LIVEREPLY_KEYSTORE_FILE")
+val releaseStorePassword = signingValue("storePassword", "LIVEREPLY_KEYSTORE_PASSWORD")
+val releaseKeyAliasValue = signingValue("keyAlias", "LIVEREPLY_KEY_ALIAS")
+val releaseKeyPassword = signingValue("keyPassword", "LIVEREPLY_KEY_PASSWORD") ?: releaseStorePassword
+val hasReleaseSigning =
+    releaseStoreFilePath != null && releaseStorePassword != null && releaseKeyAliasValue != null
+
+if (hasReleaseSigning) {
+    logger.lifecycle(
+        "Live AI Reply: signing with alias '$releaseKeyAliasValue' " +
+            "(${if (keystorePropertiesFile.exists()) "keystore.properties" else "environment variables"})."
+    )
+} else {
+    logger.lifecycle(
+        "Live AI Reply: no release signing key configured - `assembleRelease` will produce an " +
+            "UNSIGNED apk. See README -> \"Signing a release build\" (keystore.properties or " +
+            "LIVEREPLY_KEYSTORE_* environment variables)."
+    )
 }
 
 android {
@@ -12,8 +62,8 @@ android {
         applicationId = "com.liveaireply.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -23,8 +73,19 @@ android {
     }
 
     signingConfigs {
-        // Release signing is intentionally NOT configured: a signed release build must
-        // use the developer's own keystore. See README -> "Signing a release build".
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFilePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAliasValue
+                keyPassword = releaseKeyPassword
+                // v1 (JAR) keeps Android 6 and older installable; v2/v3 are what modern
+                // devices verify first. All three are signed.
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
         getByName("debug") {
             // Uses ~/.android/debug.keystore, created automatically by AGP.
         }
@@ -33,17 +94,28 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            isDebuggable = true
             applicationIdSuffix = ""
+            if (hasReleaseSigning) {
+                // Sign debug builds with the release key too, so debug and release builds
+                // share one identity and can update each other in place instead of failing
+                // with "App not installed" (signature mismatch). It is still debuggable.
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            isDebuggable = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // `signingConfig` deliberately omitted -> `assembleRelease` produces an
-            // unsigned APK/AAB that you sign with your own key.
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            // Without a key: no signingConfig -> app-release-unsigned.apk, which is
+            // reported by the build and by CI rather than silently shipped.
         }
     }
 

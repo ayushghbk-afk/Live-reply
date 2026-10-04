@@ -10,6 +10,12 @@ a floating bubble or — if you explicitly allow it — types and sends it for y
 There is a large, always-visible **STOP AI** control in the app, on the overlay and in
 the persistent notification.
 
+> **Before you install:** Google Play Protect **blocks** internet-sideloaded installs of
+> any app that declares Android accessibility access (that is a platform policy, not a bug
+> in this app — see [Google Play Protect](#51-google-play-protect--why-the-install-is-blocked)).
+> Install developer builds with `adb install`, and read that section before you try to
+> sideload an APK from a browser or file manager.
+
 ---
 
 ## 1. What it does
@@ -49,14 +55,33 @@ and the bitmap is discarded after recognition.
 - An API key for OpenRouter, OpenAI or any OpenAI-compatible endpoint
 - Permissions granted by you: Accessibility service, "Display over other apps", Notifications
   (Android 13+), optionally Screen capture for the OCR fallback
+- A way to install that Play Protect allows: `adb install` (developer/testing), a Google
+  Play listing, or an approved Play Protect appeal — see section 5.1
 
 ## 4. Build
 
 ```bash
-./gradlew assembleDebug          # debug APK
 ./gradlew test                   # unit tests (191 tests, no emulator needed)
-./gradlew assembleRelease        # unsigned release APK/AAB (sign it yourself)
+./gradlew assembleDebug          # debug APK; signed with your release key when one is configured
+./gradlew assembleRelease        # release APK; signed when a key is configured, otherwise unsigned
 ```
+
+**Signing.** `app/build.gradle.kts` reads a release key from `keystore.properties` in the
+repository root (gitignored) or from `LIVEREPLY_KEYSTORE_FILE` /
+`LIVEREPLY_KEYSTORE_PASSWORD` / `LIVEREPLY_KEY_ALIAS` / `LIVEREPLY_KEY_PASSWORD` in the
+environment. In this workspace a release key has already been generated into
+`signing/live-reply-release.keystore` together with a root `keystore.properties` (both
+gitignored, so they never reach Git). On a fresh clone, create your own:
+
+```bash
+tools/signing/make-release-keystore.sh          # writes signing/…keystore + keystore.properties
+./gradlew clean assembleDebug assembleRelease
+```
+
+When a key is configured, **both** build types are signed with it (so a debug build can
+replace a release build and vice-versa — the "App not installed" signature mismatch
+disappears). With no key, `assembleRelease` produces `app-release-unsigned.apk` and says so
+in the build log. A private key is never committed: see `signing/README.md`.
 
 Needs JDK 17+ and an Android SDK. First run downloads Gradle 8.9 and the dependencies
 (AGP 8.7.3, Compose BOM 2024.10.01, OkHttp 4.12, ML Kit text recognition 16.0.1) from
@@ -65,7 +90,9 @@ Needs JDK 17+ and an Android SDK. First run downloads Gradle 8.9 and the depende
 Set the SDK location either in `local.properties` (`sdk.dir=/path/to/Android/sdk`) or via
 `ANDROID_HOME`.
 
-APK output: `app/build/outputs/apk/debug/app-debug.apk`
+APK output:
+`app/build/outputs/apk/debug/app-debug.apk` (debuggable) and
+`app/build/outputs/apk/release/app-release.apk` (release, minified, not debuggable).
 
 ### Build the APK on GitHub (nothing to install locally)
 
@@ -77,16 +104,25 @@ SDK 35 come preinstalled on `ubuntu-latest`):
 | **Build APK** | `.github/workflows/build-apk.yml` | every push, every pull request, manual *Run workflow* | `dist/LiveReply-<version>-debug.apk` + `-release-unsigned.apk` as the **live-ai-reply-apk-…** artifact on the run page |
 | **Release APK** | `.github/workflows/release-apk.yml` | pushing a `v*` tag, or manual *Run workflow* with a tag | a GitHub **Release** with the APKs + `SHA256SUMS.txt` attached |
 
-A build of `main` is already published — grab it from the
-[Releases page](https://github.com/ayushghbk-afk/Live-reply/releases/latest)
-(`LiveReply-1.0.0-debug.apk`, signed and installable) and skip the build entirely.
+The [Releases page](https://github.com/ayushghbk-afk/Live-reply/releases/latest) carries
+the published builds. A release APK that is *properly signed* (your key, no `debuggable`
+flag) is produced as soon as the signing secrets below are set; without them the release
+asset is explicitly named `…-release-unsigned.apk` so its state is never ambiguous, and the
+debug APK is signed with a throwaway CI debug key.
 
 Getting a runnable APK without any local Android SDK:
 
 1. Push your branch, or open **Actions → Build APK → Run workflow**.
 2. Open the finished run and download the **live-ai-reply-apk-\<sha\>** artifact (a zip).
-3. Unzip it and copy `LiveReply-<version>-debug.apk` to the phone, then tap it to install.
-   The debug APK is signed, so it installs directly. `adb install -r` works too.
+3. Install it with `adb install -r LiveReply-<version>-release.apk` (or `-debug.apk`).
+   Do **not** copy the APK to the phone and tap it: Play Protect blocks internet-sideloaded
+   installs of apps with accessibility access (section 5.1), which is exactly what this app
+   needs. `adb install` is not an internet-sideloading flow and is the supported developer
+   route.
+4. The run page also carries `dist/BUILD-REPORT.txt`: the exact package name, versionCode,
+   versionName, minSdk/targetSdk, every requested permission, every component with its
+   `exported` state, the signing certificate and the SHA-256 of each APK — the same facts
+   the app's own CI verifies before publishing.
 
 The job runs `./gradlew testDebugUnitTest assembleDebug assembleRelease --continue`, so the
 APKs are uploaded even when a unit test fails — but the job is still marked red in that
@@ -107,14 +143,16 @@ a debug APK):
 | Secret | Effect |
 |---|---|
 | `ANDROID_DEBUG_KEYSTORE_BASE64` | Reuses one debug signing key across runs, so a new debug APK updates the installed app in place instead of failing with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Generate with `base64 -w0 ~/.android/debug.keystore`. |
-| `ANDROID_KEYSTORE_BASE64` | Your own release keystore (`base64 -w0 my-release.keystore`). When present, the release APK is `zipalign`ed and signed with `apksigner` and published as `LiveReply-<version>-release.apk`. |
+| `ANDROID_KEYSTORE_BASE64` | Your release keystore (`base64 -w0 signing/live-reply-release.keystore`). When present, Gradle signs **both** build types with it, the release APK is published as `LiveReply-<version>-release.apk`, and the workflow fails instead of publishing if the signature is missing. |
 | `ANDROID_KEYSTORE_PASSWORD` | Keystore password. |
 | `ANDROID_KEY_ALIAS` | Key alias inside the keystore. |
 | `ANDROID_KEY_PASSWORD` | Key password (defaults to the keystore password). |
 
-Without `ANDROID_KEYSTORE_BASE64` the release APK is attached **unsigned** (the Gradle
-release build type has no `signingConfig`, by design) and the debug APK is the
-installable one. No API key or model id is ever baked into a CI build.
+Without `ANDROID_KEYSTORE_BASE64` the release APK is attached **unsigned** and named
+`…-release-unsigned.apk`; the debug APK is signed with a CI-generated debug key that differs
+on every run (so a new debug APK cannot replace an older debug install — Android reports a
+signature mismatch). Neither the keystore nor `keystore.properties` is ever uploaded, and no
+API key or model id is ever baked into a CI build.
 
 ### Offline verification (no Android SDK required)
 
@@ -135,38 +173,121 @@ outside every Gradle source set).
 ## 5. Install
 
 ```bash
+# release build (signed, not debuggable) - what you want on a real phone
+adb install -r app/build/outputs/apk/release/app-release.apk
+
+# debug build, for development
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+
+# if an older copy signed with a different key is installed, remove it first
+adb uninstall com.liveaireply.app
 ```
+
+`adb install` prints the real error when an install fails (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`
+means a different signing key; `INSTALL_FAILED_VERSION_DOWNGRADE` means the installed
+versionCode is higher). A bare "App not installed" from the on-device installer hides that.
+
+### 5.1 Google Play Protect — why the install is blocked
+
+If you install this app from a browser, a messaging app or a file manager, Play Protect shows
+**"App blocked to protect your device — This app can request access to sensitive data. This
+can increase the risk of identity theft or financial fraud."** and refuses the install.
+
+This is not caused by the debug build, by the app's label, by `QUERY_ALL_PACKAGES`, or by the
+wording of the permission descriptions. Google's own developer guidance describes it exactly:
+
+> Applications that are downloaded directly from online sources like web browsers, messaging
+> apps, or file managers … If these applications also use sensitive permissions — `RECEIVE_SMS`,
+> `READ_SMS`, `NOTIFICATION_LISTENER`, and `ACCESSIBILITY` — they're considered high-risk
+> applications … When a user attempts to install an application from these sources and any of
+> these sensitive permissions is declared, Google Play Protect will automatically block the
+> installation.
+>
+> — [Developer Guidance for Google Play Protect Warnings](https://developers.google.com/android/play-protect/warning-dev-guidance)
+
+It is a heuristic aimed at fraud malware (the permissions that steal OTPs and read banking
+screens), it keys on the *declaration* of accessibility access, and it applies to every build
+of this app — debug, release, signed or not.
+
+What that means in practice:
+
+| Route | Status |
+|---|---|
+| **`adb install`** (developer/testing) | Works. It is not an internet-sideloading install flow. |
+| **Copy the APK to the phone and tap it** | Blocked by Play Protect while the app declares accessibility access. Not fixable by changing permissions or signing. |
+| **Google Play** | The only route that removes the block for normal users. It requires a Play Console account, the accessibility declaration form, a privacy policy, and a prominent-disclosure flow. Note that Play policy currently restricts autonomy ("Don't use the API to autonomously initiate, plan, and execute actions or decisions"), so **Auto** mode may need to stay a sideload/ADB feature. |
+| **Play Protect appeal** | If Play Protect flags the exact build as harmful (rather than applying the blanket sideload block), you can request a review: [appeals](https://developers.google.com/android/play-protect/warning-dev-guidance#request-appeal). Have the package name, versionCode, signing certificate SHA-256, the APK, and an explanation of the accessibility use ready. |
+| **Turning Play Protect off** | Works, and is explicitly not recommended. It removes protection for every other app on the phone. |
+
+What this repository does about it, honestly:
+
+- It **removes the permissions that are not needed** (see section 7), so the app declares the
+  minimum it can: accessibility, overlay, notifications, foreground service, media projection
+  and network. It does not declare SMS or notification-listener access, which are the other
+  permissions the same Play Protect rule keys on.
+- It **discloses the accessibility capability** in the first-run screen, in the accessibility
+  service description Android shows in Settings, and here.
+- It **does not** claim `isAccessibilityTool="true"`, which would be the deceptive way to look
+  eligible for fewer warnings — Google warns users specifically about apps that do that, and
+  it is exactly the kind of evasion this project will not do.
+- It **does not** obfuscate, rename or hide the accessibility service, and it ships a properly
+  signed, non-debuggable release build so that the app has a stable, verifiable identity.
+- What it **cannot** do is make Play Protect accept an internet-sideloaded accessibility app.
+  That is a platform trust/reputation decision, not a code change.
 
 ## 6. First run
 
 1. Open **Live AI Reply** → the setup wizard starts.
-2. **Accessibility**: tap *Open Accessibility settings* → *Downloaded services* →
-   *Live AI Reply* → enable it. Read the description; it states exactly what is read.
-3. **Overlay**: grant *Display over other apps* when prompted.
-4. **Notifications** (Android 13+): allow them so the monitoring notification appears.
-5. **AI provider**: keep `https://openrouter.ai/api/v1` (or set your own base URL),
+2. **Disclosure (step 1 of the wizard, cannot be skipped):** it states in plain language:
+   *"This app uses Android Accessibility Service to read visible chat text and, when enabled,
+   enter/send replies in supported chat applications."* — followed by what the service can
+   technically see, what the overlay and the foreground service do, what the optional
+   screen-capture/OCR fallback does with a captured frame, and where messages are sent.
+   **Finish setup** stays disabled until the acknowledgement switch is on; the acknowledgement
+   is stored (`acknowledged_capabilities`) and is not asked again.
+3. **Accessibility**: tap *Open Accessibility settings* → *Downloaded services* →
+   *Live AI Reply* → enable it. Read the description; it states exactly what is read. Android
+   may ask you to confirm, because the app deliberately does not claim to be a
+   disability-accessibility tool (see section 5.1).
+4. **Overlay**: grant *Display over other apps* when prompted.
+5. **Notifications** (Android 13+): allow them so the monitoring notification appears.
+6. **AI provider**: keep `https://openrouter.ai/api/v1` (or set your own base URL),
    paste your API key, tap **Save key**. The key is encrypted; it is never displayed again.
-6. **Model**: type any model id (e.g. `openai/gpt-4o-mini`) or tap **Fetch models**.
+7. **Model**: type any model id (e.g. `openai/gpt-4o-mini`) or tap **Fetch models**.
    Add fallback models comma-separated.
-7. **Persona**: pick one, or create your own later in *Manage personas*.
-8. **Mode**: choose Suggest / Approve / Auto.
-9. **Test**: tap **Test AI**, or use **Test mode** to generate a reply for a typed message.
-10. Turn **Monitoring** on. The floating `●` appears and the notification shows the mode.
+8. **Persona**: pick one, or create your own later in *Manage personas*.
+9. **Mode**: choose Suggest / Approve / Auto.
+10. **Test**: tap **Test AI**, or use **Test mode** to generate a reply for a typed message.
+11. Turn **Monitoring** on. The floating `●` appears and the notification shows the mode.
 
 ## 7. Permissions
 
-| Permission | Why |
+Everything the APK declares, and nothing else:
+
+| Declared | Required? | Why |
+|---|---|---|
+| Accessibility service (`BIND_ACCESSIBILITY_SERVICE` on the service) | **Yes — core** | Read the visible chat, find the composer, type and tap Send |
+| `SYSTEM_ALERT_WINDOW` | Yes for the overlay | The floating control and suggestion card (granted by the user in Settings) |
+| `POST_NOTIFICATIONS` | Yes on Android 13+ | The persistent notification with Pause/Stop |
+| `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_SPECIAL_USE` | Yes | Keeps the assistant alive while monitoring; the `specialUse` subtype property states what it is for |
+| `FOREGROUND_SERVICE_MEDIA_PROJECTION` | Optional feature | Only while the opt-in OCR fallback holds a MediaProjection session |
+| `INTERNET`, `ACCESS_NETWORK_STATE` | Yes | Your AI endpoint only, plus detecting that the device is offline |
+| `<queries>` for 7 chat packages | Not a permission | Package visibility for the apps this build has adapter hints for |
+
+Deliberately **not** declared (and why), verified by searching the source for each API:
+
+| Not declared | Reason |
 |---|---|
-| Accessibility service | Read the visible chat, find the composer, type and tap Send |
-| `SYSTEM_ALERT_WINDOW` | The floating control and suggestion card |
-| `POST_NOTIFICATIONS` | The persistent notification with Pause/Stop |
-| `FOREGROUND_SERVICE` + `specialUse` | Keeps the assistant alive while monitoring |
-| `FOREGROUND_SERVICE_MEDIA_PROJECTION` | On-device OCR fallback, only while armed |
-| `INTERNET` / `ACCESS_NETWORK_STATE` | Your AI endpoint only; detect offline |
+| `QUERY_ALL_PACKAGES` | No code path enumerates installed apps; the apps the assistant may act on come from a fixed list matched against accessibility events |
+| `RECEIVE_SMS`, `READ_SMS` | The app never reads or sends messages; it reads text already rendered on screen |
+| Notification-listener access | Never used — no notification reading, no notification dismissal |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | The Permissions screen opens the system battery-optimisation **list** instead (no permission needed). The restricted one-tap exempt dialog is not used |
+| `CAMERA`, `RECORD_AUDIO`, location, contacts, storage | Not used anywhere |
+| `SYSTEM_ALERT_WINDOW`-style silent grants, device admin, install packages | Not used |
 
 The API key is encrypted with a non-exportable Android Keystore key. Nothing is backed up
-(`data_extraction_rules.xml` excludes everything).
+(`data_extraction_rules.xml` excludes everything). The app also skips password/PIN/OTP/card
+fields and banking/authenticator screens, and honours the per-app exclusion list.
 
 ## 8. Configuring OpenRouter
 
@@ -303,3 +424,15 @@ Tests run: 191, passed: 191
 - OCR bubble grouping is heuristic; low-confidence scans never trigger Auto mode.
 - Multi-window / split-screen layouts are not specifically handled.
 - The assistant reads only what is visible on screen.
+- **Play Protect blocks internet-sideloaded installs of this app by policy** (section 5.1).
+  There is no permission change or signing change that fixes it; use `adb install`, publish on
+  Google Play, or appeal.
+- Play policy restricts accessibility-driven autonomy, so **Auto mode may not be acceptable
+  for a Play Store release** even though it is fully functional in a sideloaded build.
+- Android 14+ shows an extra confirmation when enabling a non-accessibility-tool service, and
+  some OEM builds additionally require "Allow restricted settings" for sideloaded apps
+  (App info → ⋮ → *Allow restricted settings*) before the accessibility toggle becomes active.
+- This build was verified by compiling and unit-testing in CI; it has **not** been installed on
+  a physical device or emulator in the development environment (no Android SDK or device was
+  available), so on-device behaviour of the accessibility, overlay and capture layers is
+  verified only as far as CI's static inspection goes - see `BUILD_NOTES.md`.

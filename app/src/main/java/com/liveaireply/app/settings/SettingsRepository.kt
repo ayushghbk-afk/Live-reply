@@ -39,6 +39,7 @@ class SettingsRepository(
                 autoReplyEnabled = prefs[AppDataStore.Keys.AUTO_REPLY_ENABLED] ?: false,
                 emergencyStopped = prefs[AppDataStore.Keys.EMERGENCY_STOPPED] ?: false,
                 acknowledgedAutomationRisk = prefs[AppDataStore.Keys.ACKNOWLEDGED_AUTOMATION_RISK] ?: false,
+                acknowledgedCapabilities = prefs[AppDataStore.Keys.ACKNOWLEDGED_CAPABILITIES] ?: false,
 
                 debounceMs = prefs[AppDataStore.Keys.DEBOUNCE_MS] ?: 900L,
                 pollingIntervalMs = prefs[AppDataStore.Keys.POLLING_INTERVAL_MS] ?: 0L,
@@ -120,6 +121,10 @@ class SettingsRepository(
             put(
                 AppDataStore.Keys.ACKNOWLEDGED_AUTOMATION_RISK,
                 next.acknowledgedAutomationRisk, previous.acknowledgedAutomationRisk
+            )
+            put(
+                AppDataStore.Keys.ACKNOWLEDGED_CAPABILITIES,
+                next.acknowledgedCapabilities, previous.acknowledgedCapabilities
             )
             put(AppDataStore.Keys.DEBOUNCE_MS, next.debounceMs, previous.debounceMs)
             put(AppDataStore.Keys.POLLING_INTERVAL_MS, next.pollingIntervalMs, previous.pollingIntervalMs)

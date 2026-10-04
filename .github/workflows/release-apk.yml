@@ -2,21 +2,23 @@
 #
 # Trigger it by pushing a version tag:
 #
-#   git tag v1.0.0
-#   git push origin v1.0.0
+#   git tag v1.0.1
+#   git push origin v1.0.1
 #
 # ...or by hand from the Actions tab ("Run workflow") and typing the tag to publish.
 #
-# The release always gets the installable debug APK. The release APK is signed with your
-# own key when the signing secrets below are configured, otherwise it is attached
-# unsigned so you can sign it yourself:
+# Signing is done by Gradle, with the key from these repository secrets (see
+# signing/README.md):
 #
-#   ANDROID_KEYSTORE_BASE64    base64 -w0 my-release.keystore
-#   ANDROID_KEYSTORE_PASSWORD  the keystore password
-#   ANDROID_KEY_ALIAS          the key alias inside the keystore
-#   ANDROID_KEY_PASSWORD       the key password
-#   ANDROID_DEBUG_KEYSTORE_BASE64  (optional) a stable debug keystore so the debug APK
-#                                  can be updated in place on a phone
+#   ANDROID_KEYSTORE_BASE64        base64 -w0 signing/live-reply-release.keystore
+#   ANDROID_KEYSTORE_PASSWORD      keystore password
+#   ANDROID_KEY_ALIAS              key alias inside the keystore
+#   ANDROID_KEY_PASSWORD           key password (defaults to the keystore password)
+#   ANDROID_DEBUG_KEYSTORE_BASE64  (optional) a stable debug keystore, used only when no
+#                                  release key is configured
+#
+# With no key configured the release APK is attached UNSIGNED, named
+# `...-release-unsigned.apk` so its state is obvious, and the run summary says so.
 name: Release APK
 
 on:
@@ -25,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish (e.g. v1.0.0). Created from the current ref if it does not exist.'
+        description: 'Tag to publish (e.g. v1.0.1). Created from the current ref if it does not exist.'
         required: true
         type: string
 
@@ -50,7 +52,7 @@ jobs:
         id: meta
         env:
           INPUT_TAG: ${{ inputs.tag }}
-        run: |
+        run: |-
           set -euo pipefail
           if [ -n "${INPUT_TAG:-}" ]; then
             tag="$INPUT_TAG"
@@ -76,11 +78,39 @@ jobs:
       - name: Set up Gradle (dependency + build cache)
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Prepare the debug signing key
+      - name: Configure the release signing key (only when the secrets are set)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |-
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "No ANDROID_KEYSTORE_BASE64 secret configured - the release APK will be published"
+            echo "UNSIGNED as '...-release-unsigned.apk'. See signing/README.md."
+            exit 0
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          # keystore.properties is gitignored; the runner is ephemeral and the file is
+          # never uploaded, so the private key does not leave the machine.
+          {
+            echo "storeFile=$RUNNER_TEMP/release.keystore"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          } > keystore.properties
+          echo "Release signing key configured (alias: $KEY_ALIAS)."
+
+      - name: Prepare a debug signing key (only used when no release key is configured)
         env:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
-        run: |
+        run: |-
           set -euo pipefail
+          if [ -f keystore.properties ]; then
+            echo "A release key is configured, so Gradle signs both build types with it."
+            exit 0
+          fi
           mkdir -p "$HOME/.android"
           if [ -n "${DEBUG_KEYSTORE_BASE64:-}" ]; then
             printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$HOME/.android/debug.keystore"
@@ -92,12 +122,12 @@ jobs:
               -alias androiddebugkey \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
-            echo "Generated a fresh debug keystore."
+            echo "Generated a fresh debug keystore for this run."
           fi
 
       - name: Run the unit tests and build the APKs
         id: build
-        run: |
+        run: |-
           set -o pipefail
           ./gradlew --stacktrace --console=plain \
             testDebugUnitTest \
@@ -106,7 +136,7 @@ jobs:
 
       - name: Publish the build errors as annotations
         if: failure()
-        run: |
+        run: |-
           set +e
           set -o pipefail
           [ -f gradle-build.log ] || exit 0
@@ -124,13 +154,14 @@ jobs:
           exit 0
 
       - name: Collect the APKs
-        run: |
+        run: |-
           set -euo pipefail
           mkdir -p dist
           version="${{ steps.meta.outputs.version }}"
           for apk in app/build/outputs/apk/*/*.apk; do
             [ -e "$apk" ] || continue
-            # app/build/outputs/apk/debug/app-debug.apk -> LiveReply-1.0.0-debug.apk
+            # app/build/outputs/apk/debug/app-debug.apk        -> LiveReply-1.0.1-debug.apk
+            # app/build/outputs/apk/release/app-release.apk    -> LiveReply-1.0.1-release.apk
             suffix="$(basename "$apk" .apk)"
             suffix="${suffix#app-}"
             out="dist/LiveReply-${version}-${suffix}.apk"
@@ -139,53 +170,33 @@ jobs:
           done
           ls -lh dist
 
-      - name: Sign the release APK (only when the signing secrets are set)
+      - name: Signing check (fails loudly if a configured key was not used)
         env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          VERSION: ${{ steps.meta.outputs.version }}
-        run: |
+          SIGNING_CONFIGURED: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        run: |-
           set -euo pipefail
-          unsigned="app/build/outputs/apk/release/app-release-unsigned.apk"
-          if [ -z "${KEYSTORE_BASE64:-}" ]; then
-            echo "No ANDROID_KEYSTORE_BASE64 secret configured - publishing the release APK unsigned."
-            echo "See README -> 'Signing a release build' to sign it with your own key."
-            exit 0
+          if [ "${SIGNING_CONFIGURED:-false}" = "true" ]; then
+            if [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+              echo "::error title=Unsigned release APK::A release signing key is configured, but Gradle produced app-release-unsigned.apk. The release must not be published unsigned."
+              exit 1
+            fi
+            echo "A configured signing key was used: $(ls dist/*release.apk)"
+          else
+            echo "::warning title=Release APK is unsigned::No ANDROID_KEYSTORE_BASE64 secret is set. The release APK will be published unsigned; add the secrets in signing/README.md to sign it."
           fi
-          if [ ! -f "$unsigned" ]; then
-            echo "::warning title=No unsigned release APK::Nothing to sign."
-            exit 0
-          fi
 
-          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          build_tools="$(ls -d "$sdk"/build-tools/*/ | sort -V | tail -n1)"
-          echo "Using build-tools from ${build_tools}"
-
-          trap 'rm -f keystore.jks aligned.apk' EXIT
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore.jks
-
-          key_password="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
-
-          "${build_tools}zipalign" -p -f 4 "$unsigned" aligned.apk
-          "${build_tools}apksigner" sign \
-            --ks keystore.jks \
-            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
-            --ks-key-alias "${KEY_ALIAS}" \
-            --key-pass "pass:${key_password}" \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out "dist/LiveReply-${VERSION}-release.apk" \
-            aligned.apk
-          "${build_tools}apksigner" verify --print-certs "dist/LiveReply-${VERSION}-release.apk"
-          echo "Signed dist/LiveReply-${VERSION}-release.apk"
+      - name: Verify the APKs and publish the inspection report
+        run: |-
+          set -uo pipefail
+          shopt -s nullglob
+          apks=(dist/*.apk)
+          [ ${#apks[@]} -gt 0 ] || { echo "No APK to verify."; exit 0; }
+          bash tools/ci/inspect-apks.sh "${apks[@]}"
 
       - name: Checksums and summary
         env:
           TAG: ${{ steps.meta.outputs.tag }}
-        run: |
+        run: |-
           set -euo pipefail
           ( cd dist && sha256sum ./*.apk > SHA256SUMS.txt )
           {
@@ -197,7 +208,17 @@ jobs:
               echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) |"
             done
             echo ""
-            echo 'Checksums: `SHA256SUMS.txt` in the release assets.'
+            echo 'Checksums: `SHA256SUMS.txt`. A full manifest/permission/signature dump is in'
+            echo '`BUILD-REPORT.txt`.'
+            echo ""
+            if ls dist/*release-unsigned.apk >/dev/null 2>&1; then
+              echo "**The release APK is unsigned.** Add the signing secrets (signing/README.md)"
+              echo "and re-run this workflow to publish a signed build."
+            fi
+            echo ""
+            echo "Reminder: Play Protect blocks internet-sideloaded installs of apps that declare"
+            echo "accessibility access. Install developer builds with \`adb install\` - see README"
+            echo "-> \"Google Play Protect\"."
           } >> "$GITHUB_STEP_SUMMARY"
           ls -lh dist
 
@@ -206,7 +227,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.meta.outputs.tag }}
           REPO: ${{ github.repository }}
-        run: |
+        run: |-
           set -euo pipefail
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists - uploading/replacing the assets."

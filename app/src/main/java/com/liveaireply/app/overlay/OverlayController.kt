@@ -119,8 +119,16 @@ class OverlayController(
         val desiredX = settings?.overlayPosition?.x ?: layoutParams.x
         val desiredY = settings?.overlayPosition?.y ?: layoutParams.y
         val windowWidth = if (expanded) layoutParams.width else (52 * metrics.density).roundToInt()
+        // The expanded content is capped at a 560dp scroll viewport (plus padding and
+        // the surrounding surface). Keep that whole window on-screen; clamping only for
+        // the 52dp collapsed dot can strand the STOP/Send controls below the display.
+        val windowHeight = if (expanded) {
+            minOf((600 * metrics.density).roundToInt(), metrics.heightPixels)
+        } else {
+            (52 * metrics.density).roundToInt()
+        }
         layoutParams.x = desiredX.coerceIn(0, (metrics.widthPixels - windowWidth).coerceAtLeast(0))
-        layoutParams.y = desiredY.coerceIn(0, (metrics.heightPixels - 52 * metrics.density).roundToInt().coerceAtLeast(0))
+        layoutParams.y = desiredY.coerceIn(0, (metrics.heightPixels - windowHeight).coerceAtLeast(0))
         runCatching { windowManager.updateViewLayout(view, layoutParams) }
         view.requestLayout()
     }

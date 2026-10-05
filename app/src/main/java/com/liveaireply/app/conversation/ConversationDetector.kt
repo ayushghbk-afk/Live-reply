@@ -79,6 +79,8 @@ sealed interface DetectionOutcome {
 data class ConversationState(
     var activePackageName: String? = null,
     var conversationId: String? = null,
+    var lastActivityName: String? = null,
+    var lastScreenLabel: String? = null,
     var lastProcessedMessageHash: String? = null,
     var lastIncomingMessageText: String? = null,
     var lastReplyHash: String? = null,
@@ -121,8 +123,18 @@ class ConversationDetector(
         // A different chat (or app) came to the foreground: reseed memory instead of
         // treating the backlog as brand new messages. This must run before the
         // empty-snapshot check so that opening a chat seeds its memory.
+        //
+        // Exception: the chat title appearing/disappearing between snapshots (chat UIs
+        // re-layout constantly) flips the title-based conversation id even though it is
+        // the same chat. When package and activity match and the chat was not renamed,
+        // adopt the new id and keep going instead of reseeding and silently dropping
+        // the message that arrived mid-flip.
         val conversationChanged = state.conversationId != null && state.conversationId != conversationId
-        if (conversationChanged || state.activePackageName != snapshot.packageName) {
+        if (conversationChanged && isTitleFlicker(snapshot)) {
+            state.conversationId = conversationId
+            state.lastActivityName = snapshot.activityName
+            state.lastScreenLabel = snapshot.screenLabel
+        } else if (conversationChanged || state.activePackageName != snapshot.packageName) {
             resetForConversation(snapshot)
             return DetectionOutcome.Ignored(
                 IgnoreReason.CONVERSATION_CHANGED,
@@ -130,6 +142,11 @@ class ConversationDetector(
                 conversationId
             )
         }
+        // Activity and title can change while the conversation id (usually title-based)
+        // stays stable. Keep the latest identity hints so a later title flicker is compared
+        // against the immediately preceding screen, not a stale activity from chat launch.
+        state.lastActivityName = snapshot.activityName
+        state.lastScreenLabel = snapshot.screenLabel
 
         if (snapshot.isEmpty) {
             state.observationSeeded = true
@@ -294,11 +311,29 @@ class ConversationDetector(
 
     fun isPending(hash: String): Boolean = duplicateGuard.isPending(hash)
 
+    /**
+     * True when the id change is explained by the chat title appearing or disappearing
+     * while the same screen stayed in front: same package, same activity (when known),
+     * and at least one side had no readable title. Two *different* readable titles still
+     * mean a real chat switch.
+     */
+    private fun isTitleFlicker(snapshot: ConversationSnapshot): Boolean {
+        if (state.activePackageName != snapshot.packageName) return false
+        val lastActivity = state.lastActivityName
+        if (lastActivity != null && snapshot.activityName != null && lastActivity != snapshot.activityName) return false
+        val lastLabel = state.lastScreenLabel
+        val newLabel = snapshot.screenLabel
+        if (!lastLabel.isNullOrBlank() && !newLabel.isNullOrBlank() && lastLabel.trim() != newLabel.trim()) return false
+        return true
+    }
+
     /** Call when the user asks to re-arm a conversation (or after a manual restart). */
     fun resetForConversation(snapshot: ConversationSnapshot) {
         state = ConversationState(
             activePackageName = snapshot.packageName,
             conversationId = snapshot.conversationId,
+            lastActivityName = snapshot.activityName,
+            lastScreenLabel = snapshot.screenLabel,
             observationSeeded = true,
             lastSnapshotAtMs = snapshot.capturedAtMs,
             lastContext = snapshot.turns.takeLast(config.contextMessageCount)

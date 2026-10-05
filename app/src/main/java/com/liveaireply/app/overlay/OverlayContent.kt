@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -31,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -115,6 +117,12 @@ private fun CollapsedDot(state: OverlayState, scale: Float, alpha: Float) {
 @Composable
 private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
     var edited by remember(state.replyText) { mutableStateOf(state.replyText.orEmpty()) }
+    val screenHeightDp = LocalConfiguration.current.screenHeightDp
+    val maxScrollHeight = if (screenHeightDp > 0) {
+        minOf(560, (screenHeightDp - 48).coerceAtLeast(1)).dp
+    } else {
+        560.dp
+    }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -128,6 +136,10 @@ private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
             modifier = Modifier
                 .padding(12.dp)
                 .fillMaxWidth()
+                // Bound the viewport to both a comfortable maximum and the current
+                // screen height. Without this, a wrap-content overlay can push emergency
+                // controls outside the reachable area, especially in landscape.
+                .heightIn(max = maxScrollHeight)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {

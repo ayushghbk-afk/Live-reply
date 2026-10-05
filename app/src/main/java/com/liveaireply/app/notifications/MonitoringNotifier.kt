@@ -56,6 +56,33 @@ class MonitoringNotifier(private val context: Context) {
         manager.notify(NOTIFICATION_ID, build(title, status, paused))
     }
 
+    /**
+     * Explains why monitoring did not resume when Android blocks a background
+     * foreground-service start. Its Resume action retries as a user-initiated launch;
+     * tapping the body opens the app so settings can be reviewed.
+     */
+    fun notifyActionNeeded(title: String, status: String) {
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_ai_dot)
+            .setContentTitle(title)
+            .setContentText(status)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(status))
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setContentIntent(openAppIntent())
+            .addAction(
+                0,
+                context.getString(R.string.action_resume),
+                assistantIntent(AssistantService.ACTION_RESUME)
+            )
+            .build()
+        manager.notify(ACTION_NEEDED_NOTIFICATION_ID, notification)
+    }
+
+    fun cancelActionNeeded() {
+        manager.cancel(ACTION_NEEDED_NOTIFICATION_ID)
+    }
+
     private fun baseBuilder(title: String, status: String) =
         NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_ai_dot)
@@ -92,5 +119,6 @@ class MonitoringNotifier(private val context: Context) {
     companion object {
         const val CHANNEL_ID = "live_ai_reply_monitoring"
         const val NOTIFICATION_ID = 1001
+        const val ACTION_NEEDED_NOTIFICATION_ID = 1002
     }
 }

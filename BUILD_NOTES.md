@@ -101,3 +101,13 @@ emulator runtime test has been performed either. Accessibility event delivery, t
 UI matching, Android's MediaProjection confirmation/`FLAG_SECURE` behavior, overlay behavior,
 foreground-service lifecycle, and STOP teardown therefore still require instrumented/manual
 validation on supported Android versions and representative chat apps.
+
+## Follow-up patch integration — 5 October 2026
+
+- The supplied patch did not apply cleanly because most of its runtime fixes were already
+  present in this checkout in equivalent or newer form. Its conversation-title fix and tests
+  were applied, then the remaining missing behavior was integrated against the current sources.
+- `git diff --check` passes.
+- `./gradlew test` could not start in this sandbox: there is no `java` executable or
+  `JAVA_HOME`. The new title-flicker unit tests are therefore added but **not executed here**;
+  Android CI and device verification remain required.

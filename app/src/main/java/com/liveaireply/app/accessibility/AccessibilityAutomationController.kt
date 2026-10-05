@@ -62,6 +62,12 @@ class AccessibilityAutomationController(
         return lastComposer != null
     }
 
+    /** Discard cached nodes without reading a sensitive screen into the automation cache. */
+    fun clearCachedTargets(reason: String = "targets cleared") {
+        lastComposer = null
+        lastSendTarget = SendTarget.unavailable(reason)
+    }
+
     override fun hasComposer(): Boolean = lastComposer?.isUsable == true
 
     override fun composerConfidence(): Float = lastComposer?.confidence ?: 0f

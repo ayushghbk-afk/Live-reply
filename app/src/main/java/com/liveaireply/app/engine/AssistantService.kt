@@ -94,6 +94,7 @@ class AssistantService : LifecycleService() {
             startForeground(MonitoringNotifier.NOTIFICATION_ID, notification)
         }
         foreground = true
+        notifier?.cancelActionNeeded()
     }
 
     private fun startAssistant() {

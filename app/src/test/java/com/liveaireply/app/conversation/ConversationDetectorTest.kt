@@ -246,6 +246,50 @@ class ConversationDetectorTest {
     }
 
     @Test
+    fun titleFlickerDoesNotDropTheMessageThatArrivedDuringTheFlip() {
+        openChat()
+        // The chat title is momentarily unreadable, which flips the title-based
+        // conversation id even though it is the same chat. The new message must still
+        // be delivered instead of being swallowed by a conversation re-seed.
+        val result = detector.process(
+            snapshot(turn("Are you coming tomorrow?", TurnDirection.INCOMING), screenLabel = null)
+        )
+        assertTrue("title flicker must not drop the message, got $result", result is DetectionOutcome.NewIncoming)
+    }
+
+    @Test
+    fun titleReturningAfterFlickerKeepsDuplicateMemory() {
+        openChat()
+        val message = turn("Are you coming tomorrow?", TurnDirection.INCOMING)
+        assertTrue(detector.process(snapshot(message, screenLabel = null)) is DetectionOutcome.NewIncoming)
+
+        val titleRestored = detector.process(snapshot(message, screenLabel = "Hellen"))
+        assertTrue(titleRestored is DetectionOutcome.Ignored)
+        assertEquals(IgnoreReason.SCROLL_OR_REPEAT, (titleRestored as DetectionOutcome.Ignored).reason)
+    }
+
+    @Test
+    fun aDifferentActivityIsNotMistakenForTitleFlicker() {
+        openChat()
+        val switched = detector.process(
+            snapshot(turn("Hey", TurnDirection.INCOMING), screenLabel = null)
+                .copy(activityName = "ContactListActivity")
+        )
+        assertTrue(switched is DetectionOutcome.Ignored)
+        assertEquals(IgnoreReason.CONVERSATION_CHANGED, (switched as DetectionOutcome.Ignored).reason)
+    }
+
+    @Test
+    fun switchingToADifferentChatStillReseeds() {
+        openChat()
+        val switched = detector.process(
+            snapshot(turn("Hey", TurnDirection.INCOMING), screenLabel = "Someone Else")
+        )
+        assertTrue(switched is DetectionOutcome.Ignored)
+        assertEquals(IgnoreReason.CONVERSATION_CHANGED, (switched as DetectionOutcome.Ignored).reason)
+    }
+
+    @Test
     fun incomingBubblesAreRecognisedFromRealNodeTrees() {
         val extractor = BubbleExtractor()
         val root = TestFixtures.screen(

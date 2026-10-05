@@ -8,6 +8,7 @@ import android.util.DisplayMetrics
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.content.ContextCompat
+import com.liveaireply.app.R
 import com.liveaireply.app.adapters.ChatAdapterRegistry
 import com.liveaireply.app.conversation.BubbleExtractor
 import com.liveaireply.app.conversation.ConversationSnapshot
@@ -19,6 +20,7 @@ import com.liveaireply.app.engine.AssistantRuntime
 import com.liveaireply.app.engine.AssistantService
 import com.liveaireply.app.engine.LogSeverity
 import com.liveaireply.app.engine.SnapshotInput
+import com.liveaireply.app.notifications.MonitoringNotifier
 import com.liveaireply.app.ocr.OcrBubbleGrouper
 import com.liveaireply.app.ocr.ScreenCaptureService
 import com.liveaireply.app.security.SensitiveScreenVerdict
@@ -103,8 +105,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
      * ForegroundServiceStartNotAllowedException when the process was woken in the
      * background - which is exactly what happens when the system re-binds this
      * accessibility service after a reboot or after the app was swiped away while
-     * monitoring was on. That must degrade to a log entry, never crash this service,
-     * or Android enters a re-bind/crash loop.
+     * monitoring was on. That must degrade to a log entry and actionable notification,
+     * never crash this service, or Android enters a re-bind/crash loop.
      */
     private fun tryStartAssistant(reason: String) {
         val started = runCatching {
@@ -113,9 +115,27 @@ class LiveReplyAccessibilityService : AccessibilityService() {
                 Intent(this, AssistantService::class.java).setAction(AssistantService.ACTION_START)
             )
         }.isSuccess
-        if (!started) {
+        if (started) {
+            runCatching { MonitoringNotifier(this).cancelActionNeeded() }
+            return
+        }
+
+        val detail =
+            "Monitoring is on, but Android blocked the background start. " +
+                "Tap Resume to try again, or open Live AI Reply to review settings."
+        AssistantRuntime.container?.eventLog?.log(
+            "Could not start the foreground assistant ($reason); open the app to resume monitoring",
+            "accessibility",
+            LogSeverity.WARN
+        )
+        runCatching {
+            MonitoringNotifier(this).apply {
+                createChannel()
+                notifyActionNeeded(getString(R.string.app_name), detail)
+            }
+        }.onFailure { error ->
             AssistantRuntime.container?.eventLog?.log(
-                "Could not start the foreground assistant ($reason); open the app to resume monitoring",
+                "Could not post the monitoring-resume notification: ${error.message ?: error::class.simpleName}",
                 "accessibility",
                 LogSeverity.WARN
             )
@@ -234,7 +254,14 @@ class LiveReplyAccessibilityService : AccessibilityService() {
 
             // Refresh the automation cache from the tree buildSnapshot already mapped;
             // walking the window a second time on the main thread was pure double work.
-            if (built.mapped != null) automation.refreshWith(built.mapped) else automation.refresh()
+            // Never cache nodes from a sensitive screen: even an old pending suggestion
+            // must not be able to target a credential/payment field that happens to be
+            // visible now.
+            when {
+                built.verdict.sensitive -> automation.clearCachedTargets("sensitive screen")
+                built.mapped != null -> automation.refreshWith(built.mapped)
+                else -> automation.refresh()
+            }
             val detectedLanguage = built.snapshot.newestTurn?.let { LanguageDetector.detect(it.text) }
             engine.handleSnapshot(
                 SnapshotInput(
@@ -273,7 +300,7 @@ class LiveReplyAccessibilityService : AccessibilityService() {
             return BuiltSnapshot(
                 emptySnapshot(packageName, activityName, width, height, sensitive = true),
                 verdict,
-                mapped
+                mapped = null
             )
         }
 
@@ -344,7 +371,7 @@ class LiveReplyAccessibilityService : AccessibilityService() {
             return BuiltSnapshot(
                 emptySnapshot(packageName, activityName, width, height, sensitive = true),
                 SensitiveScreenVerdict(true, "OCR detected a credential or payment screen"),
-                mapped
+                mapped = null
             )
         }
 

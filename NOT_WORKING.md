@@ -1,33 +1,38 @@
 # What is not working — Live AI Reply defect report
 
-**Date:** 4 October 2026
-**Branch:** `arena/01a10894-live-reply`, branched from `main` @ `527fb72`
+**Date:** 5 October 2026
+**Branch:** `arena/01a10c2f-live-reply`, branched from `main` @ `2579f7b`
 **Method:** full static review of the Android source + CI history. No physical device /
 emulator was available in this sandbox, so items are code-verified; where behavior
 depends on a device it is marked **needs device verification**.
 
-## Fix status (updated 4 October 2026, second pass on this branch)
+## Fix status (updated 5 October 2026, follow-up patch integration)
 
 | # | Item | Status |
 |---|---|---|
 | 1 | Main-thread AI calls freeze the app | **Fixed** — whole pipeline now on `Dispatchers.Default` |
 | 2 | Blocking overlay actions | **Fixed** — `AssistantRuntime.postEngineAction`; `runBlocking` DataStore write removed |
 | 3 | Accessibility tree mapped twice per burst | **Fixed** — automation cache reuses the mapped tree (`refreshWith`) |
-| 4 | Unguarded background `startForegroundService` | **Fixed** — guarded + logged (`tryStartAssistant`) |
+| 4 | Unguarded background `startForegroundService` | **Fixed** — guarded, logged, and surfaced with a tap-to-resume notification (`tryStartAssistant`) |
 | 5 | Monitoring FGS survives accessibility revocation | **Fixed** — `onUnbind` pauses the engine and stops the service |
 | 6 | Stale notification; Pause without Resume | **Fixed** — engine status refresh + dynamic Pause/Resume action |
-| 7 | Conversation-ID flip on title change | **Deferred** — behavior acceptable; changing ids without device tests risks worse regressions |
+| 7 | Conversation-ID flip on title change | **Fixed** — tolerate title flicker only when package/activity remain stable; unit tests cover flicker and real chat switches |
 | 8 | "User is typing" inferred from any event | **Fixed** — only editable-node text changes count |
-| 9 | Expanded overlay card not scrollable | **Fixed** — whole card scrolls; removed a nested unbounded scroll that would also have crashed |
+| 9 | Expanded overlay card not scrollable | **Fixed** — whole card scrolls in a bounded viewport so STOP/Send remain reachable |
 | 10 | No default model/key ("does nothing") | **Improved** — Home checklist card + Monitoring gate explains what to configure |
 | 11 | CI APK install/update failures | **Fixed** — committed `debug.keystore` (debug-only) gives a stable identity; workflows use it |
 | 12 | First-run guidance | **Improved** — Home "finish these steps" card, ✓ checkmarks in the wizard |
 | 13 | Chat-app view-id drift | External by nature — adapters + user overrides remain the remedy |
 
-Also in the second pass: in-app Back navigation on sub-screens, dismissible message and
-error cards (overlay errors now surface in the app), colored engine-status dot on Home,
-error-red STOP controls, tonal navigation buttons, severity-colored logs with an empty
-state, and a busy spinner on the test console.
+The detailed defect descriptions below record the original audit findings; the status
+table above reflects the current branch after the follow-up patch. The 5 October
+integration also clears cached automation targets on sensitive screens and adds a
+notification Resume action when Android blocks a background foreground-service start.
+
+The earlier second pass also added in-app Back navigation on sub-screens, dismissible
+message and error cards (overlay errors now surface in the app), a colored engine-status
+dot on Home, error-red STOP controls, tonal navigation buttons, severity-colored logs
+with an empty state, and a busy spinner on the test console.
 
 ---
 
@@ -224,8 +229,12 @@ re-seeds memory and **ignores the exact message** that arrived during the transi
 **Impact:** sporadically, the first reply in a chat is silently skipped. Self-healing,
 but looks like flakiness.
 
-**Fix sketch:** derive the conversation id from stable parts (package + activity, or a
-first-bubble signature) instead of the volatile title; keep the title for prompts only.
+**Follow-up implementation (5 October):** `ConversationDetector` tracks the last activity
+and screen label. If the id changes but the package and known activity still match, it
+preserves detector memory when at least one title is unreadable; two different readable
+titles or a different known activity still reseed as a real switch. Unit tests cover the
+title disappearing/reappearing path and both real-switch guards. Device behavior still
+needs verification.
 
 ---
 
@@ -323,7 +332,7 @@ settings are the intended remedy.
 
 ---
 
-## Fix order recommended
+## Original fix order recommended (before integration)
 
 | Priority | Item |
 |---|---|
@@ -342,7 +351,9 @@ settings are the intended remedy.
 - Items 1–9: verified by reading the source on this branch; the threading findings are
   also contradicted by `ReplyEngine`'s own documented contract, which makes them
   unambiguous.
-- Item 4: crash depends on Android version and prior app state — **needs device
+- Item 4: crash recovery depends on Android version and prior app state — **needs device
   verification** (reboot with monitoring on; swipe from recents; Android 12/14/15).
-- No runtime/device test was executed in this sandbox (no Android SDK, and gradle.org is
-  unreachable from it); see `BUILD_NOTES.md` for the local vs CI evidence split.
+- The follow-up title-flicker tests are added but could not be executed in this sandbox
+  because no Java runtime is installed; see `BUILD_NOTES.md` for the verification record.
+- No runtime/device test was executed in this sandbox; see `BUILD_NOTES.md` for the local
+  vs CI evidence split.

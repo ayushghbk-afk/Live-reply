@@ -41,6 +41,13 @@ val releaseKeyPassword = signingValue("keyPassword", "LIVEREPLY_KEY_PASSWORD") ?
 val hasReleaseSigning =
     releaseStoreFilePath != null && releaseStorePassword != null && releaseKeyAliasValue != null
 
+// A committed DEBUG-ONLY keystore gives every builder (local machines and CI) one stable
+// debug identity, so a newer debug APK updates an older install instead of failing with
+// "App not installed" (signature mismatch). Debug builds are debuggable and this key
+// protects nothing beyond them; RELEASE keys are still never committed (signing/README.md).
+// Used only when no release key is configured (release signing covers both build types).
+val committedDebugKeystore = rootProject.file("debug.keystore")
+
 if (hasReleaseSigning) {
     logger.lifecycle(
         "Live AI Reply: signing with alias '$releaseKeyAliasValue' " +
@@ -99,7 +106,17 @@ android {
                 // share one identity and can update each other in place instead of failing
                 // with "App not installed" (signature mismatch). It is still debuggable.
                 signingConfig = signingConfigs.getByName("release")
+            } else if (committedDebugKeystore.exists()) {
+                // Stable debug identity shared by local builds and every CI run.
+                signingConfigs.getByName("debug").apply {
+                    storeFile = committedDebugKeystore
+                    storePassword = "android"
+                    keyAlias = "androiddebugkey"
+                    keyPassword = "android"
+                }
             }
+            // Otherwise AGP falls back to ~/.android/debug.keystore, whose identity
+            // differs per machine and per fresh CI runner.
         }
         release {
             isMinifyEnabled = true

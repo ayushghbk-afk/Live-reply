@@ -99,6 +99,11 @@ jobs:
             echo "A release key is configured, so Gradle signs both build types with it."
             exit 0
           fi
+          if [ -f debug.keystore ]; then
+            echo "Using the committed debug-only keystore (debug.keystore): every build shares"
+            echo "one debug identity, so debug APKs update previous installs in place."
+            exit 0
+          fi
           mkdir -p "$HOME/.android"
           if [ -n "${DEBUG_KEYSTORE_BASE64:-}" ]; then
             printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$HOME/.android/debug.keystore"

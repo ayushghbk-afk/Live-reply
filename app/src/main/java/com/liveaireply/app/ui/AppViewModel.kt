@@ -145,6 +145,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 _message.value = "Enable Live AI Reply in Android Accessibility settings first."
                 return@launch
             }
+            if (!aiConfigured()) {
+                // Monitoring without a working provider can only produce errors; tell the
+                // user where to fix it instead of silently "doing nothing" forever.
+                _message.value = "Set up your AI endpoint, API key and model in AI settings first."
+                return@launch
+            }
 
             AssistantRuntime.clearEmergencyStopForUserStart()
             persist { it.copy(monitoringEnabled = true, emergencyStopped = false) }
@@ -230,6 +236,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun maskedApiKey(): String = container.credentialStore.maskedApiKey()
 
     fun hasApiKey(): Boolean = container.credentialStore.hasApiKey()
+
+    /** Everything the provider needs to actually answer a request. */
+    fun aiConfigured(): Boolean =
+        container.currentSettings.primaryModel.isNotBlank() && hasApiKey()
+
+    fun dismissMessage() {
+        _message.value = null
+    }
+
+    fun dismissError() {
+        AssistantRuntime.clearError()
+    }
 
     /** "Test AI" / "Test Connection": one real round trip with a tiny prompt. */
     fun testConnection() {

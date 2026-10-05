@@ -7,8 +7,12 @@ import com.liveaireply.app.automation.AutomationController
 import com.liveaireply.app.di.AppContainer
 import com.liveaireply.app.settings.AppSettings
 import com.liveaireply.app.util.EventLog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Process-wide glue between the accessibility service, the foreground service, the
@@ -42,6 +46,17 @@ object AssistantRuntime {
 
     private val _errors = MutableStateFlow<String?>(null)
     val errors: StateFlow<String?> = _errors
+
+    /**
+     * Engine actions can block for many seconds (AI round trip, reply delay, simulated
+     * typing). Overlay and UI taps must post them here instead of calling
+     * [ReplyEngine.handleAction] directly on the main thread, which froze the app.
+     */
+    private val engineActionScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    fun postEngineAction(action: OverlayAction, editedText: String? = null) {
+        engineActionScope.launch { engine?.handleAction(action, editedText) }
+    }
 
     fun requireContainer(context: Context): AppContainer =
         container ?: AppContainer(context).also { container = it }

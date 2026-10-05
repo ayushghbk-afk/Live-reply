@@ -81,5 +81,13 @@ secret store and your own machine hold it.
 Android's debug builds are signed with a throwaway key generated per machine
 (`~/.android/debug.keystore`). Two debug APKs built on different machines therefore have
 different signatures and cannot replace each other — one of the reasons a debug APK is a
-bad distribution artefact. Because a release key is configured here, the debug APK is
-signed with the release key instead, which removes that problem.
+bad distribution artefact.
+
+To make debug installs updatable, this repository commits a **debug-only** keystore at
+`./debug.keystore` (alias `androiddebugkey`, password `android`, the standard debug
+credential conventions). When no release key is configured, `app/build.gradle.kts` signs
+debug builds with it, so every local build and every CI run share one debug identity and
+newer debug APKs install over older ones. It grants no trust beyond debuggable builds,
+and `.gitignore` whitelists exactly that one file (`!debug.keystore`) while every other
+keystore pattern stays ignored. When the release key above is configured, it signs both
+build types instead, which removes the problem entirely.

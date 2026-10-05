@@ -31,7 +31,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Reads visible conversation nodes in apps the user explicitly enabled and exposes the
@@ -54,9 +53,13 @@ class LiveReplyAccessibilityService : AccessibilityService() {
     private var pollJob: Job? = null
     private var settingsJob: Job? = null
     private var controller: AccessibilityAutomationController? = null
+    @Volatile
     private var lastPackage: String? = null
+    @Volatile
     private var lastActivity: String? = null
-    private var lastEventAtMs = 0L
+    /** Updated only by text edits in an editable field, so "user is typing" means real typing. */
+    @Volatile
+    private var lastTypingAtMs = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -83,11 +86,7 @@ class LiveReplyAccessibilityService : AccessibilityService() {
                 updatePackageScope(settings.enabledPackages)
                 restartPolling(settings)
                 if (canMonitor(settings) && AssistantRuntime.engine == null) {
-                    ContextCompat.startForegroundService(
-                        this@LiveReplyAccessibilityService,
-                        Intent(this@LiveReplyAccessibilityService, AssistantService::class.java)
-                            .setAction(AssistantService.ACTION_START)
-                    )
+                    tryStartAssistant("settings changed")
                 }
             }
         }
@@ -95,9 +94,30 @@ class LiveReplyAccessibilityService : AccessibilityService() {
         val settings = container.currentSettings
         updatePackageScope(settings.enabledPackages)
         if (canMonitor(settings)) {
+            tryStartAssistant("accessibility service connected")
+        }
+    }
+
+    /**
+     * Starts the foreground assistant safely. Android 12+ throws
+     * ForegroundServiceStartNotAllowedException when the process was woken in the
+     * background - which is exactly what happens when the system re-binds this
+     * accessibility service after a reboot or after the app was swiped away while
+     * monitoring was on. That must degrade to a log entry, never crash this service,
+     * or Android enters a re-bind/crash loop.
+     */
+    private fun tryStartAssistant(reason: String) {
+        val started = runCatching {
             ContextCompat.startForegroundService(
                 this,
                 Intent(this, AssistantService::class.java).setAction(AssistantService.ACTION_START)
+            )
+        }.isSuccess
+        if (!started) {
+            AssistantRuntime.container?.eventLog?.log(
+                "Could not start the foreground assistant ($reason); open the app to resume monitoring",
+                "accessibility",
+                LogSeverity.WARN
             )
         }
     }
@@ -120,14 +140,25 @@ class LiveReplyAccessibilityService : AccessibilityService() {
                 lastPackage = packageName
                 lastActivity = event.className?.toString()
             }
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                if (lastPackage != packageName) lastPackage = packageName
+            }
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
                 if (lastPackage != packageName) lastPackage = packageName
+                // Only an edit inside an editable node counts as typing. New incoming
+                // bubbles also fire text-changed events and must not mark the user as
+                // typing (which would suppress AUTO mode at random).
+                val editInProgress = runCatching {
+                    val source = event.source
+                    val editable = source?.isEditable == true
+                    source?.recycle()
+                    editable
+                }.getOrDefault(false)
+                if (editInProgress) lastTypingAtMs = System.currentTimeMillis()
             }
             else -> return
         }
 
-        lastEventAtMs = System.currentTimeMillis()
         debouncer.onChanged("$packageName/${event.windowId}")
         scheduleProcessing(settings.debounceMs.coerceIn(150L, 5_000L))
     }
@@ -154,12 +185,21 @@ class LiveReplyAccessibilityService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         connected = false
         if (AssistantRuntime.automation === controller) AssistantRuntime.automation = null
+        // Accessibility delivers no events after this, so the foreground assistant would
+        // keep displaying "Monitoring" while being able to read nothing. Pause the engine
+        // and tear the foreground service down; stopService is allowed from the
+        // background, unlike startForegroundService. Re-enabling the service re-enters
+        // onServiceConnected, which starts the assistant again when monitoring is on.
+        AssistantRuntime.engine?.pauseAll("Accessibility service was turned off")
+        runCatching {
+            stopService(Intent(this, AssistantService::class.java))
+        }
         return super.onUnbind(intent)
     }
 
     /** True while the user is actively typing in the composer. */
     private fun userIsTyping(): Boolean =
-        System.currentTimeMillis() - lastEventAtMs < 1_500L &&
+        System.currentTimeMillis() - lastTypingAtMs < 1_500L &&
             AssistantRuntime.automation?.composerContent()?.isNotBlank() == true
 
     private fun canMonitor(settings: AppSettings): Boolean =
@@ -183,13 +223,18 @@ class LiveReplyAccessibilityService : AccessibilityService() {
         val settings = container.currentSettings
         if (!canMonitor(settings) || !settings.isPackageEnabled(packageName)) return
 
-        scope.launch {
-            val built = withContext(Dispatchers.Default) {
-                buildSnapshot(packageName, lastActivity, settings)
-            } ?: return@launch
+        // Everything below blocks: the node-tree walk, the optional OCR fallback, then
+        // the engine call with its AI network round trip, retry/backoff waits, AUTO-mode
+        // reply delay and simulated typing. Running that on the main thread froze the
+        // whole app (and stalled accessibility callbacks) for every generated reply, so
+        // the complete pipeline runs on a background dispatcher.
+        scope.launch(Dispatchers.Default) {
+            val built = buildSnapshot(packageName, lastActivity, settings) ?: return@launch
             if (AssistantRuntime.emergencyStopRequested) return@launch
 
-            automation.refresh()
+            // Refresh the automation cache from the tree buildSnapshot already mapped;
+            // walking the window a second time on the main thread was pure double work.
+            if (built.mapped != null) automation.refreshWith(built.mapped) else automation.refresh()
             val detectedLanguage = built.snapshot.newestTurn?.let { LanguageDetector.detect(it.text) }
             engine.handleSnapshot(
                 SnapshotInput(
@@ -227,7 +272,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
         if (verdict.sensitive) {
             return BuiltSnapshot(
                 emptySnapshot(packageName, activityName, width, height, sensitive = true),
-                verdict
+                verdict,
+                mapped
             )
         }
 
@@ -265,7 +311,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
                     source = TurnSource.ACCESSIBILITY,
                     extractionConfidence = 1f
                 ),
-                SensitiveScreenVerdict.CLEAR
+                SensitiveScreenVerdict.CLEAR,
+                mapped
             )
         }
 
@@ -278,7 +325,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
         if (!canUseOcr) {
             return BuiltSnapshot(
                 emptySnapshot(packageName, activityName, width, height, sensitive = false, title = title),
-                SensitiveScreenVerdict.CLEAR
+                SensitiveScreenVerdict.CLEAR,
+                mapped
             )
         }
 
@@ -295,7 +343,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
         if (lines.any { NoiseFilter.hasSensitiveHint(it.text) }) {
             return BuiltSnapshot(
                 emptySnapshot(packageName, activityName, width, height, sensitive = true),
-                SensitiveScreenVerdict(true, "OCR detected a credential or payment screen")
+                SensitiveScreenVerdict(true, "OCR detected a credential or payment screen"),
+                mapped
             )
         }
 
@@ -320,7 +369,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
                 source = TurnSource.OCR,
                 extractionConfidence = confidence
             ),
-            SensitiveScreenVerdict.CLEAR
+            SensitiveScreenVerdict.CLEAR,
+            mapped
         )
     }
 
@@ -373,7 +423,9 @@ class LiveReplyAccessibilityService : AccessibilityService() {
 
     private data class BuiltSnapshot(
         val snapshot: ConversationSnapshot,
-        val verdict: SensitiveScreenVerdict
+        val verdict: SensitiveScreenVerdict,
+        /** The window tree walk that produced the snapshot; reused for the automation cache. */
+        val mapped: com.liveaireply.app.conversation.NodeView? = null
     )
 
     companion object {

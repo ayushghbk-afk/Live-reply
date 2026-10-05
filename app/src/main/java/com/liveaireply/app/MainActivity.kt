@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,21 +15,29 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.Divider
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,14 +49,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
-import com.liveaireply.app.adapters.ChatAdapterRegistry
 import com.liveaireply.app.accessibility.LiveReplyAccessibilityService
+import com.liveaireply.app.adapters.ChatAdapterRegistry
+import com.liveaireply.app.engine.AssistantStatus
+import com.liveaireply.app.engine.LogSeverity
 import com.liveaireply.app.ocr.OcrCaptureState
 import com.liveaireply.app.security.CapabilityStatus
 import com.liveaireply.app.personas.Persona
@@ -97,6 +110,8 @@ private fun AppRoot(viewModel: AppViewModel, systemStatusRefresh: Int) {
     LaunchedEffect(settings.setupCompleted) {
         if (settings.setupCompleted && screen == "setup") screen = "home"
     }
+    // Sub-screens get an in-app back affordance; system back used to just exit the app.
+    BackHandler(enabled = screen != "home" && screen != "setup") { screen = "home" }
 
     Scaffold(
         topBar = {
@@ -106,6 +121,7 @@ private fun AppRoot(viewModel: AppViewModel, systemStatusRefresh: Int) {
                     Text(
                         text = context.getString(R.string.stop_ai),
                         color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold,
                         modifier = Modifier
                             .padding(end = 12.dp)
                             .clickable { viewModel.emergencyStop() }
@@ -122,6 +138,9 @@ private fun AppRoot(viewModel: AppViewModel, systemStatusRefresh: Int) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            if (screen != "home" && screen != "setup") {
+                TextButton(onClick = { screen = "home" }) { Text("\u2190 Back to home") }
+            }
             when (screen) {
                 "home" -> HomeScreen(viewModel, settings, onNavigate = { screen = it })
                 "setup" -> SetupScreen(viewModel, settings, onDone = { screen = "home" })
@@ -134,8 +153,26 @@ private fun AppRoot(viewModel: AppViewModel, systemStatusRefresh: Int) {
                 "logs" -> LogsScreen(viewModel)
                 "test" -> TestModeScreen(viewModel)
             }
-            message?.let {
-                Card { Text(it, modifier = Modifier.padding(12.dp), fontSize = 13.sp) }
+            message?.let { msg ->
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(start = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = msg,
+                            fontSize = 13.sp,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(vertical = 12.dp)
+                        )
+                        TextButton(onClick = { viewModel.dismissMessage() }) { Text("Dismiss") }
+                    }
+                }
             }
         }
     }
@@ -143,20 +180,98 @@ private fun AppRoot(viewModel: AppViewModel, systemStatusRefresh: Int) {
 
 // --------------------------------------------------------------------- screens
 
+/** Colored status dot, same palette as the floating overlay. */
+@Composable
+private fun StatusDot(color: Color) {
+    Surface(shape = CircleShape, color = color, modifier = Modifier.size(10.dp)) {}
+}
+
+@Composable
+private fun engineStatusColor(status: AssistantStatus): Color = when (status) {
+    AssistantStatus.MONITORING -> Color(0xFF2E7D32)
+    AssistantStatus.THINKING -> Color(0xFFF9A825)
+    AssistantStatus.REPLY_READY -> Color(0xFF1565C0)
+    AssistantStatus.ERROR -> MaterialTheme.colorScheme.error
+    AssistantStatus.PAUSED -> Color(0xFF6D4C41)
+    AssistantStatus.STOPPED -> Color(0xFF424242)
+    AssistantStatus.IDLE -> Color(0xFF546E7A)
+}
+
 @Composable
 private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigate: (String) -> Unit) {
     val overlay by viewModel.overlayState.collectAsState()
+    val runtimeError by viewModel.errors.collectAsState()
     val context = LocalContext.current
     val running = LiveReplyAccessibilityService.isRunning()
     var showAutoDisclosure by remember { mutableStateOf(false) }
 
+    // Engine/overlay failures surface here instead of only on the overlay.
+    runtimeError?.let { errorText ->
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer
+            )
+        ) {
+            Row(
+                modifier = Modifier.padding(start = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = errorText,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 12.dp)
+                )
+                TextButton(onClick = { viewModel.dismissError() }) { Text("Dismiss") }
+            }
+        }
+    }
+
     SectionCard(title = "Status") {
-        StatusLine("Service", if (running) "Running" else "Not connected")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusDot(engineStatusColor(overlay.status))
+            Text(
+                text = "${overlay.status.label} - ${overlay.statusDetail.ifBlank { "Ready" }}",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+        StatusLine("Service", if (running) "Accessibility connected" else "Accessibility not connected")
         StatusLine("Mode", settings.mode.label)
-        StatusLine("AI model", settings.primaryModel.ifBlank { "not set" })
+        StatusLine(
+            "AI model",
+            settings.primaryModel.ifBlank { "not set" }
+        )
         StatusLine("Persona", settings.personaId)
         StatusLine("Current app", overlay.currentAppLabel ?: "-")
-        StatusLine("Status", "${overlay.status.label} ${overlay.statusDetail}")
+    }
+
+    // The "why is it doing nothing?" checklist: one button per missing setup step.
+    val accessibilityGranted = CapabilityStatus.accessibilityEnabled(context)
+    val aiReady = viewModel.aiConfigured()
+    if (!settings.acknowledgedCapabilities || !accessibilityGranted || !aiReady) {
+        SectionCard(title = "Finish these steps to get replies") {
+            if (!settings.acknowledgedCapabilities) {
+                FilledTonalButton(onClick = { onNavigate("setup") }, modifier = Modifier.fillMaxWidth()) {
+                    Text("1. Accept the disclosure in the setup wizard")
+                }
+            }
+            if (!accessibilityGranted) {
+                FilledTonalButton(
+                    onClick = { openAccessibilitySettings(context) },
+                    enabled = settings.acknowledgedCapabilities,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("2. Enable Live AI Reply in Accessibility settings") }
+            }
+            if (!aiReady) {
+                FilledTonalButton(onClick = { onNavigate("ai") }, modifier = Modifier.fillMaxWidth()) {
+                    Text("3. Configure the AI endpoint, API key and model")
+                }
+            }
+        }
     }
 
     SectionCard(title = "Monitoring") {
@@ -204,11 +319,16 @@ private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigat
         )
     }
 
-    Button(onClick = { viewModel.testConnection() }, modifier = Modifier.fillMaxWidth()) {
-        Text("Test AI")
+    OutlinedButton(onClick = { viewModel.testConnection() }, modifier = Modifier.fillMaxWidth()) {
+        Text("Test AI connection")
     }
+    // The loudest control on the screen: global emergency stop, always error-red.
     Button(
         onClick = { viewModel.emergencyStop() },
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.error,
+            contentColor = MaterialTheme.colorScheme.onError
+        ),
         modifier = Modifier.fillMaxWidth()
     ) { Text(context.getString(R.string.stop_ai), fontWeight = FontWeight.Bold) }
 
@@ -229,12 +349,15 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
     val context = LocalContext.current
     var key by remember { mutableStateOf("") }
     var showAutoDisclosure by remember { mutableStateOf(false) }
+    // "\u2713" marks the steps that are actually done, so progress is visible at a glance.
+    val accessibilityGranted = CapabilityStatus.accessibilityEnabled(context)
+    val overlayGranted = CapabilityStatus.overlayGranted(context)
 
     // The disclosure comes first and cannot be skipped: the sensitive capabilities are
     // stated in plain language before any permission is requested, and "Finish setup" stays
     // disabled until the user has acknowledged them (tracked by
     // AppSettings.acknowledgedCapabilities, which is also recorded in preferences).
-    SectionCard(title = "1. ${context.getString(R.string.disclosure_title)}") {
+    SectionCard(title = "1. ${context.getString(R.string.disclosure_title)}${if (settings.acknowledgedCapabilities) "  \u2713" else ""}") {
         Text(
             text = context.getString(R.string.disclosure_accessibility),
             fontWeight = FontWeight.SemiBold
@@ -255,14 +378,14 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
             "shows it in the app or optional floating assistant. Suggest mode is the default; " +
             "nothing is typed or sent until you act.")
     }
-    SectionCard(title = "3. Accessibility permission") {
+    SectionCard(title = "3. Accessibility permission${if (accessibilityGranted) "  \u2713" else ""}") {
         Text("Needed to read the conversation and to type the reply. Without it the app cannot see any chat.")
         OutlinedButton(
             onClick = { openAccessibilitySettings(context) },
             enabled = settings.acknowledgedCapabilities
         ) { Text("Open Accessibility settings") }
     }
-    SectionCard(title = "4. Optional floating assistant") {
+    SectionCard(title = "4. Optional floating assistant${if (overlayGranted) "  \u2713" else ""}") {
         Text("Off by default. Android's Display over other apps grant and the in-app switch " +
             "are both required. You can remove the floating UI at any time.", fontSize = 12.sp)
         OutlinedButton(
@@ -278,7 +401,7 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
     SectionCard(title = "5. Screen capture / OCR") {
         OcrControls(viewModel, settings)
     }
-    SectionCard(title = "6. AI provider") {
+    SectionCard(title = "6. AI provider${if (viewModel.hasApiKey()) "  \u2713" else ""}") {
         OutlinedTextField(
             value = settings.baseUrl,
             onValueChange = { viewModel.update { s -> s.copy(baseUrl = it) } },
@@ -294,7 +417,7 @@ private fun SetupScreen(viewModel: AppViewModel, settings: AppSettings, onDone: 
         Button(onClick = { viewModel.saveApiKey(key); key = "" }) { Text("Save key") }
         Button(onClick = { viewModel.testConnection() }) { Text("Test connection") }
     }
-    SectionCard(title = "7. Model") {
+    SectionCard(title = "7. Model${if (settings.primaryModel.isNotBlank()) "  \u2713" else ""}") {
         OutlinedTextField(
             value = settings.primaryModel,
             onValueChange = { viewModel.update { s -> s.copy(primaryModel = it) } },
@@ -837,10 +960,23 @@ private fun LogsScreen(viewModel: AppViewModel) {
     val logs by viewModel.logs.collectAsState()
     SectionCard(title = "Diagnostics") {
         OutlinedButton(onClick = { viewModel.clearLogs() }) { Text("Clear logs") }
+        if (logs.isEmpty()) {
+            Text(
+                "No log entries yet. They appear once monitoring detects or generates something.",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         logs.takeLast(120).reversed().forEach { entry ->
             Text(
-                text = "${com.liveaireply.app.util.EventLog.formatLine(entry)}",
-                fontSize = 11.sp
+                text = com.liveaireply.app.util.EventLog.formatLine(entry),
+                fontSize = 11.sp,
+                color = when (entry.severity) {
+                    LogSeverity.ERROR -> MaterialTheme.colorScheme.error
+                    LogSeverity.WARN -> Color(0xFFB26A00)
+                    LogSeverity.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
+                    LogSeverity.INFO -> Color.Unspecified
+                }
             )
         }
     }
@@ -849,6 +985,7 @@ private fun LogsScreen(viewModel: AppViewModel) {
 @Composable
 private fun TestModeScreen(viewModel: AppViewModel) {
     var incoming by remember { mutableStateOf("Are you coming tomorrow?") }
+    val busy by viewModel.busy.collectAsState()
     SectionCard(title = "Test mode") {
         Text("Runs the full pipeline (prompt, model, validation) without touching another " +
             "app.", fontSize = 12.sp)
@@ -858,9 +995,26 @@ private fun TestModeScreen(viewModel: AppViewModel) {
             label = { Text("Incoming message") },
             modifier = Modifier.fillMaxWidth()
         )
-        Button(onClick = { viewModel.runTestReply(incoming) }, modifier = Modifier.fillMaxWidth()) {
-            Text("Generate test reply")
+        Button(
+            onClick = { viewModel.runTestReply(incoming) },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (busy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+            } else {
+                Text("Generate test reply")
+            }
         }
+        Text(
+            "The reply appears in the card below and on the overlay when one is shown.",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -967,13 +1121,13 @@ private fun ConsentCheckbox(label: String, checked: Boolean, onChecked: (Boolean
 
 @Composable
 private fun SectionCard(title: String, content: @Composable () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)) {
         Column(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Divider()
+            HorizontalDivider()
             content()
         }
     }
@@ -1021,7 +1175,7 @@ private fun ChoiceRow(label: String, description: String, selected: Boolean, onC
 
 @Composable
 private fun NavRow(label: String, onClick: () -> Unit) {
-    OutlinedButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) { Text(label) }
+    FilledTonalButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) { Text(label) }
 }
 
 @Composable

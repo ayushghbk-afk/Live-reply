@@ -123,9 +123,12 @@ private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
         modifier = Modifier.padding(4.dp)
     ) {
         Column(
+            // Scrollable as a whole: with a long reply the Send/Copy/STOP controls must
+            // stay reachable even on a small screen or in landscape.
             modifier = Modifier
                 .padding(12.dp)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -165,13 +168,9 @@ private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
                         textStyle = MaterialTheme.typography.bodyMedium
                     )
                 } else {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        Text(text = "\u201C${state.replyText}\u201D", fontSize = 13.sp)
-                    }
+                    // No inner scroll: the whole card scrolls, and a nested unbounded
+                    // vertical scroll would throw at measure time.
+                    Text(text = "\u201C${state.replyText}\u201D", fontSize = 13.sp)
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -204,7 +203,9 @@ private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
 }
 
 private fun act(action: OverlayAction, edited: String? = null) {
-    AssistantRuntime.engine?.handleAction(action, edited?.takeIf { it.isNotBlank() })
+    // Never run engine actions on the compose/main thread: SEND, REGENERATE and the
+    // AUTO path make blocking AI calls and sleep for typing simulation.
+    AssistantRuntime.postEngineAction(action, edited?.takeIf { it.isNotBlank() })
 }
 
 private fun statusColor(status: AssistantStatus): Color = when (status) {

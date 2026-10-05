@@ -42,12 +42,20 @@ class AccessibilityAutomationController(
             lastSendTarget = SendTarget.unavailable("no window content")
             return false
         }
-        val (width, height) = screenSize()
         val mapped = NodeMapper.map(rootInfo, null) ?: run {
             lastComposer = null
             lastSendTarget = SendTarget.unavailable("empty node tree")
             return false
         }
+        return refreshWith(mapped)
+    }
+
+    /**
+     * Caches composer + send target from an already mapped window tree, so a snapshot
+     * extraction does not pay for a second walk of the same accessibility tree.
+     */
+    fun refreshWith(mapped: NodeView): Boolean {
+        val (width, height) = screenSize()
         val (adapter, overrides) = adapterProvider()
         lastComposer = adapter.locateComposer(mapped, width, height, overrides)
         lastSendTarget = adapter.locateSendTarget(mapped, lastComposer, overrides)

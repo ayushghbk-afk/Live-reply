@@ -36,9 +36,13 @@ class MonitoringNotifier(private val context: Context) {
         manager.createNotificationChannel(channel)
     }
 
-    fun build(title: String, status: String): Notification =
+    fun build(title: String, status: String, paused: Boolean = false): Notification =
         baseBuilder(title, status)
-            .addAction(0, context.getString(R.string.action_pause), assistantIntent(AssistantService.ACTION_PAUSE))
+            .addAction(
+                0,
+                context.getString(if (paused) R.string.action_resume else R.string.action_pause),
+                assistantIntent(if (paused) AssistantService.ACTION_RESUME else AssistantService.ACTION_PAUSE)
+            )
             .addAction(0, context.getString(R.string.action_stop), assistantIntent(AssistantService.ACTION_STOP))
             .build()
 
@@ -48,8 +52,8 @@ class MonitoringNotifier(private val context: Context) {
             .addAction(0, context.getString(R.string.action_stop), captureIntent())
             .build()
 
-    fun update(title: String, status: String) {
-        manager.notify(NOTIFICATION_ID, build(title, status))
+    fun update(title: String, status: String, paused: Boolean = false) {
+        manager.notify(NOTIFICATION_ID, build(title, status, paused))
     }
 
     private fun baseBuilder(title: String, status: String) =

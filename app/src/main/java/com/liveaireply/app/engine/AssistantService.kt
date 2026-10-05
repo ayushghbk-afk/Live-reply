@@ -115,8 +115,16 @@ class AssistantService : LifecycleService() {
                 stopSelfSafely()
                 return@launch
             }
-            val pauses = DataStoreConversationPauses(container)
-            val host = EngineHostAndroid(context) { stopSelfSafely() }
+            val pauses = DataStoreConversationPauses(container, scope)
+            val host = EngineHostAndroid(
+                context,
+                { stopSelfSafely() },
+                statusListener = { status, detail ->
+                    // Keep the persistent notification in sync with the engine; while
+                    // paused it offers Resume instead of Pause.
+                    notifier?.update(appLabel(null), detail, paused = status == AssistantStatus.PAUSED)
+                }
+            )
             val engine = ReplyEngine(
                 detector = container.conversationDetector(),
                 pipeline = container.replyPipeline(),
@@ -196,7 +204,8 @@ class AssistantService : LifecycleService() {
 
     /** "Pause this chat" list backed by settings storage. */
     private class DataStoreConversationPauses(
-        private val container: com.liveaireply.app.di.AppContainer
+        private val container: com.liveaireply.app.di.AppContainer,
+        private val persistScope: CoroutineScope
     ) : ConversationPauseController {
         override fun isPaused(conversationId: String) =
             container.currentSettings.isConversationPaused(conversationId)
@@ -209,8 +218,11 @@ class AssistantService : LifecycleService() {
 
         private fun mutate(transform: (List<String>) -> List<String>) {
             val next = transform(container.currentSettings.pausedConversations).distinct()
+            // Apply to the in-memory cache synchronously (engine checks read it right
+            // away), then persist asynchronously. The old runBlocking write did disk
+            // I/O on whichever thread tapped an overlay button - including the main one.
             container.currentSettings = container.currentSettings.copy(pausedConversations = next)
-            kotlinx.coroutines.runBlocking {
+            persistScope.launch(Dispatchers.IO) {
                 container.settingsRepository.update { it.copy(pausedConversations = next) }
             }
         }

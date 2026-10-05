@@ -3,14 +3,20 @@ package com.liveaireply.app.engine
 import android.content.Context
 import com.liveaireply.app.util.EventLog
 
-/** Android [EngineHost] that forwards to the runtime, the log buffer and a stop hook. */
+/**
+ * Android [EngineHost] that forwards to the runtime, the log buffer, an optional
+ * persistent-notification refresher and a stop hook.
+ */
 class EngineHostAndroid(
     private val context: Context,
-    private val onStop: () -> Unit
+    private val onStop: () -> Unit,
+    private val statusListener: ((AssistantStatus, String) -> Unit)? = null
 ) : EngineHost {
 
     override fun onStatusChanged(status: AssistantStatus, detail: String) {
         AssistantRuntime.publishOverlay(AssistantRuntime.overlayState.value.copy(status = status, statusDetail = detail))
+        // Mirrors engine state to the foreground notification so it cannot go stale.
+        statusListener?.invoke(status, detail)
     }
 
     override fun onOverlayStateChanged(state: OverlayState) {

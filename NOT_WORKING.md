@@ -6,6 +6,29 @@
 emulator was available in this sandbox, so items are code-verified; where behavior
 depends on a device it is marked **needs device verification**.
 
+## Fix status (updated 4 October 2026, second pass on this branch)
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Main-thread AI calls freeze the app | **Fixed** — whole pipeline now on `Dispatchers.Default` |
+| 2 | Blocking overlay actions | **Fixed** — `AssistantRuntime.postEngineAction`; `runBlocking` DataStore write removed |
+| 3 | Accessibility tree mapped twice per burst | **Fixed** — automation cache reuses the mapped tree (`refreshWith`) |
+| 4 | Unguarded background `startForegroundService` | **Fixed** — guarded + logged (`tryStartAssistant`) |
+| 5 | Monitoring FGS survives accessibility revocation | **Fixed** — `onUnbind` pauses the engine and stops the service |
+| 6 | Stale notification; Pause without Resume | **Fixed** — engine status refresh + dynamic Pause/Resume action |
+| 7 | Conversation-ID flip on title change | **Deferred** — behavior acceptable; changing ids without device tests risks worse regressions |
+| 8 | "User is typing" inferred from any event | **Fixed** — only editable-node text changes count |
+| 9 | Expanded overlay card not scrollable | **Fixed** — whole card scrolls; removed a nested unbounded scroll that would also have crashed |
+| 10 | No default model/key ("does nothing") | **Improved** — Home checklist card + Monitoring gate explains what to configure |
+| 11 | CI APK install/update failures | **Fixed** — committed `debug.keystore` (debug-only) gives a stable identity; workflows use it |
+| 12 | First-run guidance | **Improved** — Home "finish these steps" card, ✓ checkmarks in the wizard |
+| 13 | Chat-app view-id drift | External by nature — adapters + user overrides remain the remedy |
+
+Also in the second pass: in-app Back navigation on sub-screens, dismissible message and
+error cards (overlay errors now surface in the app), colored engine-status dot on Home,
+error-red STOP controls, tonal navigation buttons, severity-colored logs with an empty
+state, and a busy spinner on the test console.
+
 ---
 
 ## 0. First, what IS working

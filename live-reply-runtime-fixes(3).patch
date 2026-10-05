@@ -1,0 +1,702 @@
+From 617050da6a85573cc619b2c45cc901bcf847ec67 Mon Sep 17 00:00:00 2001
+From: Kimi <kimi@moonshot.ai>
+Date: Mon, 5 Oct 2026 12:42:48 +0000
+Subject: [PATCH] fix: resolve P0-P2 runtime defects from NOT_WORKING.md
+
+#1 move handleSnapshot pipeline off the main thread (Dispatchers.Default)
+#2 dispatch overlay actions to a background scope; drop runBlocking in pauses
+#3 reuse the mapped accessibility tree instead of mapping it twice per burst
+#4 guard background startForegroundService; notify user when Android blocks it
+#5 stop the monitoring foreground service when accessibility is revoked
+#6 live notification status text; Resume action replaces Pause while paused
+#7 tolerate chat-title flicker in ConversationDetector (no dropped messages)
+#8 'user is typing' now requires a real text-change event, not any window event
+#9 expanded overlay card scrolls so STOP/Send stay reachable on small screens
+#10 Home screen prominently warns when no model/API key is configured
+---
+ .../java/com/liveaireply/app/MainActivity.kt  | 27 ++++++
+ .../AccessibilityAutomationController.kt      | 29 +++---
+ .../LiveReplyAccessibilityService.kt          | 89 ++++++++++++++-----
+ .../app/conversation/ConversationDetector.kt  | 32 ++++++-
+ .../app/engine/AssistantRuntime.kt            | 22 +++++
+ .../app/engine/AssistantService.kt            | 54 ++++++++++-
+ .../app/notifications/MonitoringNotifier.kt   | 34 +++++--
+ .../liveaireply/app/overlay/OverlayContent.kt | 16 +++-
+ .../conversation/ConversationDetectorTest.kt  | 22 +++++
+ 9 files changed, 279 insertions(+), 46 deletions(-)
+
+diff --git a/app/src/main/java/com/liveaireply/app/MainActivity.kt b/app/src/main/java/com/liveaireply/app/MainActivity.kt
+index ed49927..c970877 100644
+--- a/app/src/main/java/com/liveaireply/app/MainActivity.kt
++++ b/app/src/main/java/com/liveaireply/app/MainActivity.kt
+@@ -149,6 +149,33 @@ private fun HomeScreen(viewModel: AppViewModel, settings: AppSettings, onNavigat
+     val context = LocalContext.current
+     val running = LiveReplyAccessibilityService.isRunning()
+     var showAutoDisclosure by remember { mutableStateOf(false) }
++    val aiConfigured = settings.primaryModel.isNotBlank() && viewModel.hasApiKey()
++
++    // The #1 "it does nothing" cause: setup finished without a model and API key, so
++    // every detected message ends in "No model configured". Say so here, up front.
++    if (!aiConfigured) {
++        Card(modifier = Modifier.fillMaxWidth()) {
++            Column(modifier = Modifier.padding(12.dp)) {
++                Text(
++                    text = "AI is not configured yet",
++                    fontWeight = FontWeight.Bold,
++                    color = MaterialTheme.colorScheme.error
++                )
++                Text(
++                    text = buildString {
++                        if (settings.primaryModel.isBlank()) append("No model selected. ")
++                        if (!viewModel.hasApiKey()) append("No API key saved. ")
++                        append("The assistant cannot generate replies until both are set.")
++                    },
++                    fontSize = 12.sp
++                )
++                Button(
++                    onClick = { onNavigate("ai") },
++                    modifier = Modifier.fillMaxWidth()
++                ) { Text("Open AI settings") }
++            }
++        }
++    }
+ 
+     SectionCard(title = "Status") {
+         StatusLine("Service", if (running) "Running" else "Not connected")
+diff --git a/app/src/main/java/com/liveaireply/app/accessibility/AccessibilityAutomationController.kt b/app/src/main/java/com/liveaireply/app/accessibility/AccessibilityAutomationController.kt
+index f3008e5..05c0eb0 100644
+--- a/app/src/main/java/com/liveaireply/app/accessibility/AccessibilityAutomationController.kt
++++ b/app/src/main/java/com/liveaireply/app/accessibility/AccessibilityAutomationController.kt
+@@ -35,19 +35,26 @@ class AccessibilityAutomationController(
+     @Volatile
+     private var lastSendTarget: SendTarget = SendTarget.unavailable("not scanned yet")
+ 
+-    /** Re-scans the current window and caches composer + send target. */
+-    fun refresh(): Boolean {
+-        val rootInfo = rootProvider() ?: run {
+-            lastComposer = null
+-            lastSendTarget = SendTarget.unavailable("no window content")
+-            return false
++    /**
++     * Re-scans the current window and caches composer + send target.
++     *
++     * When [mappedRoot] is provided (already mapped by the snapshot builder in the same
++     * event burst) it is reused instead of mapping the accessibility tree a second time.
++     */
++    fun refresh(mappedRoot: NodeView? = null): Boolean {
++        val mapped = mappedRoot ?: run {
++            val rootInfo = rootProvider() ?: run {
++                lastComposer = null
++                lastSendTarget = SendTarget.unavailable("no window content")
++                return false
++            }
++            NodeMapper.map(rootInfo, null) ?: run {
++                lastComposer = null
++                lastSendTarget = SendTarget.unavailable("empty node tree")
++                return false
++            }
+         }
+         val (width, height) = screenSize()
+-        val mapped = NodeMapper.map(rootInfo, null) ?: run {
+-            lastComposer = null
+-            lastSendTarget = SendTarget.unavailable("empty node tree")
+-            return false
+-        }
+         val (adapter, overrides) = adapterProvider()
+         lastComposer = adapter.locateComposer(mapped, width, height, overrides)
+         lastSendTarget = adapter.locateSendTarget(mapped, lastComposer, overrides)
+diff --git a/app/src/main/java/com/liveaireply/app/accessibility/LiveReplyAccessibilityService.kt b/app/src/main/java/com/liveaireply/app/accessibility/LiveReplyAccessibilityService.kt
+index b21508e..a9ea4ba 100644
+--- a/app/src/main/java/com/liveaireply/app/accessibility/LiveReplyAccessibilityService.kt
++++ b/app/src/main/java/com/liveaireply/app/accessibility/LiveReplyAccessibilityService.kt
+@@ -8,6 +8,7 @@ import android.util.DisplayMetrics
+ import android.view.accessibility.AccessibilityEvent
+ import android.view.accessibility.AccessibilityNodeInfo
+ import androidx.core.content.ContextCompat
++import com.liveaireply.app.R
+ import com.liveaireply.app.adapters.ChatAdapterRegistry
+ import com.liveaireply.app.conversation.BubbleExtractor
+ import com.liveaireply.app.conversation.ConversationSnapshot
+@@ -19,6 +20,7 @@ import com.liveaireply.app.engine.AssistantRuntime
+ import com.liveaireply.app.engine.AssistantService
+ import com.liveaireply.app.engine.LogSeverity
+ import com.liveaireply.app.engine.SnapshotInput
++import com.liveaireply.app.notifications.MonitoringNotifier
+ import com.liveaireply.app.ocr.OcrBubbleGrouper
+ import com.liveaireply.app.ocr.ScreenCaptureService
+ import com.liveaireply.app.security.SensitiveScreenVerdict
+@@ -31,7 +33,6 @@ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.cancel
+ import kotlinx.coroutines.launch
+-import kotlinx.coroutines.withContext
+ 
+ /**
+  * Reads visible conversation nodes in apps the user explicitly enabled and exposes the
+@@ -54,13 +55,18 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+     private var pollJob: Job? = null
+     private var settingsJob: Job? = null
+     private var controller: AccessibilityAutomationController? = null
++    // Written on the main thread (event callbacks), read on background workers.
++    @Volatile
+     private var lastPackage: String? = null
++    @Volatile
+     private var lastActivity: String? = null
+-    private var lastEventAtMs = 0L
++    @Volatile
++    private var lastComposerTextChangeAtMs = 0L
+ 
+     override fun onServiceConnected() {
+         super.onServiceConnected()
+         connected = true
++        AssistantRuntime.setAccessibilityConnected(true)
+         val container = AssistantRuntime.requireContainer(applicationContext)
+         val automation = AccessibilityAutomationController(
+             service = this,
+@@ -83,11 +89,7 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+                 updatePackageScope(settings.enabledPackages)
+                 restartPolling(settings)
+                 if (canMonitor(settings) && AssistantRuntime.engine == null) {
+-                    ContextCompat.startForegroundService(
+-                        this@LiveReplyAccessibilityService,
+-                        Intent(this@LiveReplyAccessibilityService, AssistantService::class.java)
+-                            .setAction(AssistantService.ACTION_START)
+-                    )
++                    tryStartAssistant(container)
+                 }
+             }
+         }
+@@ -95,10 +97,33 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+         val settings = container.currentSettings
+         updatePackageScope(settings.enabledPackages)
+         if (canMonitor(settings)) {
+-            ContextCompat.startForegroundService(
+-                this,
+-                Intent(this, AssistantService::class.java).setAction(AssistantService.ACTION_START)
++            tryStartAssistant(container)
++        }
++    }
++
++    /**
++     * Starts the foreground assistant, guarded for background starts. Android 12+ can
++     * throw ForegroundServiceStartNotAllowedException when the process was re-created in
++     * the background (e.g. after a reboot) only to re-bind this accessibility service;
++     * an unguarded call would crash the process and rebind in a loop. On failure the
++     * user gets a notification that opens the app, and monitoring resumes from there.
++     */
++    private fun tryStartAssistant(container: com.liveaireply.app.di.AppContainer) {
++        val intent = Intent(this, AssistantService::class.java).setAction(AssistantService.ACTION_START)
++        val started = runCatching { ContextCompat.startForegroundService(this, intent) }.isSuccess
++        if (!started) {
++            container.eventLog.log(
++                "Assistant start deferred: Android blocked a background foreground-service start",
++                "accessibility",
++                LogSeverity.WARN
+             )
++            MonitoringNotifier(this).apply {
++                createChannel()
++                notifyActionNeeded(
++                    getString(R.string.app_name),
++                    "Monitoring is on but Android blocked the background start. Tap to open the app and resume."
++                )
++            }
+         }
+     }
+ 
+@@ -120,14 +145,18 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+                 lastPackage = packageName
+                 lastActivity = event.className?.toString()
+             }
+-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
++            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
++                if (lastPackage != packageName) lastPackage = packageName
++            }
+             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                 if (lastPackage != packageName) lastPackage = packageName
++                // Only genuine text edits count as "the user is typing". Window-state
++                // events (keyboard opening, dialogs) must not hold back AUTO sends.
++                lastComposerTextChangeAtMs = System.currentTimeMillis()
+             }
+             else -> return
+         }
+ 
+-        lastEventAtMs = System.currentTimeMillis()
+         debouncer.onChanged("$packageName/${event.windowId}")
+         scheduleProcessing(settings.debounceMs.coerceIn(150L, 5_000L))
+     }
+@@ -142,6 +171,7 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+ 
+     override fun onDestroy() {
+         connected = false
++        AssistantRuntime.setAccessibilityConnected(false)
+         pendingJob?.cancel()
+         pollJob?.cancel()
+         settingsJob?.cancel()
+@@ -153,13 +183,14 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+ 
+     override fun onUnbind(intent: Intent?): Boolean {
+         connected = false
++        AssistantRuntime.setAccessibilityConnected(false)
+         if (AssistantRuntime.automation === controller) AssistantRuntime.automation = null
+         return super.onUnbind(intent)
+     }
+ 
+     /** True while the user is actively typing in the composer. */
+     private fun userIsTyping(): Boolean =
+-        System.currentTimeMillis() - lastEventAtMs < 1_500L &&
++        System.currentTimeMillis() - lastComposerTextChangeAtMs < 1_500L &&
+             AssistantRuntime.automation?.composerContent()?.isNotBlank() == true
+ 
+     private fun canMonitor(settings: AppSettings): Boolean =
+@@ -183,13 +214,15 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+         val settings = container.currentSettings
+         if (!canMonitor(settings) || !settings.isPackageEnabled(packageName)) return
+ 
+-        scope.launch {
+-            val built = withContext(Dispatchers.Default) {
+-                buildSnapshot(packageName, lastActivity, settings)
+-            } ?: return@launch
++        // The whole pipeline runs off the main thread. handleSnapshot performs a blocking
++        // AI call (with retries and backoff) and must never run on Main - doing so freezes
++        // the app UI and stalls accessibility callbacks (ANR / service unbind).
++        scope.launch(Dispatchers.Default) {
++            val built = buildSnapshot(packageName, lastActivity, settings) ?: return@launch
+             if (AssistantRuntime.emergencyStopRequested) return@launch
+ 
+-            automation.refresh()
++            // Reuse the tree already mapped by buildSnapshot instead of mapping it again.
++            automation.refresh(built.root)
+             val detectedLanguage = built.snapshot.newestTurn?.let { LanguageDetector.detect(it.text) }
+             engine.handleSnapshot(
+                 SnapshotInput(
+@@ -227,7 +260,9 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+         if (verdict.sensitive) {
+             return BuiltSnapshot(
+                 emptySnapshot(packageName, activityName, width, height, sensitive = true),
+-                verdict
++                verdict,
++                // Never hand a sensitive screen's mapped tree to the automation cache.
++                root = null
+             )
+         }
+ 
+@@ -265,7 +300,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+                     source = TurnSource.ACCESSIBILITY,
+                     extractionConfidence = 1f
+                 ),
+-                SensitiveScreenVerdict.CLEAR
++                SensitiveScreenVerdict.CLEAR,
++                root = mapped
+             )
+         }
+ 
+@@ -278,7 +314,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+         if (!canUseOcr) {
+             return BuiltSnapshot(
+                 emptySnapshot(packageName, activityName, width, height, sensitive = false, title = title),
+-                SensitiveScreenVerdict.CLEAR
++                SensitiveScreenVerdict.CLEAR,
++                root = mapped
+             )
+         }
+ 
+@@ -295,7 +332,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+         if (lines.any { NoiseFilter.hasSensitiveHint(it.text) }) {
+             return BuiltSnapshot(
+                 emptySnapshot(packageName, activityName, width, height, sensitive = true),
+-                SensitiveScreenVerdict(true, "OCR detected a credential or payment screen")
++                SensitiveScreenVerdict(true, "OCR detected a credential or payment screen"),
++                root = null
+             )
+         }
+ 
+@@ -320,7 +358,8 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+                 source = TurnSource.OCR,
+                 extractionConfidence = confidence
+             ),
+-            SensitiveScreenVerdict.CLEAR
++            SensitiveScreenVerdict.CLEAR,
++            root = mapped
+         )
+     }
+ 
+@@ -373,7 +412,9 @@ class LiveReplyAccessibilityService : AccessibilityService() {
+ 
+     private data class BuiltSnapshot(
+         val snapshot: ConversationSnapshot,
+-        val verdict: SensitiveScreenVerdict
++        val verdict: SensitiveScreenVerdict,
++        /** The already-mapped window tree, reused by the automation cache (no double map). */
++        val root: com.liveaireply.app.conversation.NodeView?
+     )
+ 
+     companion object {
+diff --git a/app/src/main/java/com/liveaireply/app/conversation/ConversationDetector.kt b/app/src/main/java/com/liveaireply/app/conversation/ConversationDetector.kt
+index d5be516..9a22bf8 100644
+--- a/app/src/main/java/com/liveaireply/app/conversation/ConversationDetector.kt
++++ b/app/src/main/java/com/liveaireply/app/conversation/ConversationDetector.kt
+@@ -79,6 +79,8 @@ sealed interface DetectionOutcome {
+ data class ConversationState(
+     var activePackageName: String? = null,
+     var conversationId: String? = null,
++    var lastActivityName: String? = null,
++    var lastScreenLabel: String? = null,
+     var lastProcessedMessageHash: String? = null,
+     var lastIncomingMessageText: String? = null,
+     var lastReplyHash: String? = null,
+@@ -121,8 +123,18 @@ class ConversationDetector(
+         // A different chat (or app) came to the foreground: reseed memory instead of
+         // treating the backlog as brand new messages. This must run before the
+         // empty-snapshot check so that opening a chat seeds its memory.
++        //
++        // Exception: the chat title appearing/disappearing between snapshots (chat UIs
++        // re-layout constantly) flips the title-based conversation id even though it is
++        // the same chat. When package and activity match and the chat was not renamed,
++        // adopt the new id and keep going instead of reseeding and silently dropping
++        // the message that arrived mid-flip.
+         val conversationChanged = state.conversationId != null && state.conversationId != conversationId
+-        if (conversationChanged || state.activePackageName != snapshot.packageName) {
++        if (conversationChanged && isTitleFlicker(snapshot)) {
++            state.conversationId = conversationId
++            state.lastActivityName = snapshot.activityName
++            state.lastScreenLabel = snapshot.screenLabel
++        } else if (conversationChanged || state.activePackageName != snapshot.packageName) {
+             resetForConversation(snapshot)
+             return DetectionOutcome.Ignored(
+                 IgnoreReason.CONVERSATION_CHANGED,
+@@ -294,11 +306,29 @@ class ConversationDetector(
+ 
+     fun isPending(hash: String): Boolean = duplicateGuard.isPending(hash)
+ 
++    /**
++     * True when the id change is explained by the chat title appearing or disappearing
++     * while the same screen stayed in front: same package, same activity (when known),
++     * and at least one side had no readable title. Two *different* readable titles still
++     * mean a real chat switch.
++     */
++    private fun isTitleFlicker(snapshot: ConversationSnapshot): Boolean {
++        if (state.activePackageName != snapshot.packageName) return false
++        val lastActivity = state.lastActivityName
++        if (lastActivity != null && snapshot.activityName != null && lastActivity != snapshot.activityName) return false
++        val lastLabel = state.lastScreenLabel
++        val newLabel = snapshot.screenLabel
++        if (!lastLabel.isNullOrBlank() && !newLabel.isNullOrBlank() && lastLabel.trim() != newLabel.trim()) return false
++        return true
++    }
++
+     /** Call when the user asks to re-arm a conversation (or after a manual restart). */
+     fun resetForConversation(snapshot: ConversationSnapshot) {
+         state = ConversationState(
+             activePackageName = snapshot.packageName,
+             conversationId = snapshot.conversationId,
++            lastActivityName = snapshot.activityName,
++            lastScreenLabel = snapshot.screenLabel,
+             observationSeeded = true,
+             lastSnapshotAtMs = snapshot.capturedAtMs,
+             lastContext = snapshot.turns.takeLast(config.contextMessageCount)
+diff --git a/app/src/main/java/com/liveaireply/app/engine/AssistantRuntime.kt b/app/src/main/java/com/liveaireply/app/engine/AssistantRuntime.kt
+index 1a68aa9..43e1fe7 100644
+--- a/app/src/main/java/com/liveaireply/app/engine/AssistantRuntime.kt
++++ b/app/src/main/java/com/liveaireply/app/engine/AssistantRuntime.kt
+@@ -7,6 +7,9 @@ import com.liveaireply.app.automation.AutomationController
+ import com.liveaireply.app.di.AppContainer
+ import com.liveaireply.app.settings.AppSettings
+ import com.liveaireply.app.util.EventLog
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+ 
+@@ -40,6 +43,25 @@ object AssistantRuntime {
+     private val _overlayState = MutableStateFlow(OverlayState())
+     val overlayState: StateFlow<OverlayState> = _overlayState
+ 
++    /**
++     * True while the accessibility service is connected. The foreground assistant
++     * observes this and tears itself down when accessibility is revoked, instead of
++     * claiming "Monitoring" forever with no possible input.
++     */
++    private val _accessibilityConnected = MutableStateFlow(false)
++    val accessibilityConnected: StateFlow<Boolean> = _accessibilityConnected
++
++    fun setAccessibilityConnected(value: Boolean) {
++        _accessibilityConnected.value = value
++    }
++
++    /**
++     * Background scope for engine actions triggered from Compose click handlers
++     * (overlay buttons). handleSnapshot/handleAction may block on network I/O and must
++     * never run on the main thread.
++     */
++    val actionScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
++
+     private val _errors = MutableStateFlow<String?>(null)
+     val errors: StateFlow<String?> = _errors
+ 
+diff --git a/app/src/main/java/com/liveaireply/app/engine/AssistantService.kt b/app/src/main/java/com/liveaireply/app/engine/AssistantService.kt
+index 7251dab..1854cb4 100644
+--- a/app/src/main/java/com/liveaireply/app/engine/AssistantService.kt
++++ b/app/src/main/java/com/liveaireply/app/engine/AssistantService.kt
+@@ -14,7 +14,9 @@ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.cancel
++import kotlinx.coroutines.flow.distinctUntilChanged
+ import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.flow.map
+ import kotlinx.coroutines.launch
+ 
+ /**
+@@ -31,6 +33,8 @@ class AssistantService : LifecycleService() {
+     private var notifier: MonitoringNotifier? = null
+     private var overlay: OverlayController? = null
+     private var settingsJob: Job? = null
++    private var statusJob: Job? = null
++    private var accessibilityJob: Job? = null
+     private var started = false
+     private var foreground = false
+ 
+@@ -115,7 +119,7 @@ class AssistantService : LifecycleService() {
+                 stopSelfSafely()
+                 return@launch
+             }
+-            val pauses = DataStoreConversationPauses(container)
++            val pauses = DataStoreConversationPauses(container, scope)
+             val host = EngineHostAndroid(context) { stopSelfSafely() }
+             val engine = ReplyEngine(
+                 detector = container.conversationDetector(),
+@@ -144,6 +148,43 @@ class AssistantService : LifecycleService() {
+                 }
+             }
+             notifier?.update(appLabel(settings), statusLine())
++
++            // Keep the persistent notification's text and actions in sync with the
++            // engine (Thinking / Reply ready / Paused...), swapping Pause for Resume
++            // while paused. Only re-posts when the rendered content changes.
++            statusJob?.cancel()
++            statusJob = scope.launch {
++                AssistantRuntime.overlayState
++                    .map { state ->
++                        Triple(
++                            appLabel(null),
++                            "${state.status.label} - ${state.statusDetail.ifBlank { "Ready" }}",
++                            state.status == AssistantStatus.PAUSED
++                        )
++                    }
++                    .distinctUntilChanged()
++                    .collect { (title, status, paused) ->
++                        notifier?.update(title, status, paused)
++                    }
++            }
++
++            // Tear the foreground service down the moment accessibility is revoked,
++            // instead of claiming "Monitoring" forever with no possible input.
++            accessibilityJob?.cancel()
++            accessibilityJob = scope.launch {
++                AssistantRuntime.accessibilityConnected
++                    .distinctUntilChanged()
++                    .collect { connected ->
++                        if (!connected) {
++                            container.eventLog.log(
++                                "Accessibility connection lost - stopping monitoring service",
++                                "engine",
++                                LogSeverity.WARN
++                            )
++                            stopSelfSafely()
++                        }
++                    }
++            }
+         }
+     }
+ 
+@@ -179,6 +220,8 @@ class AssistantService : LifecycleService() {
+     private fun stopSelfSafely() {
+         overlay?.detach()
+         settingsJob?.cancel()
++        statusJob?.cancel()
++        accessibilityJob?.cancel()
+         if (foreground) {
+             stopForeground(STOP_FOREGROUND_REMOVE)
+             foreground = false
+@@ -189,6 +232,8 @@ class AssistantService : LifecycleService() {
+     override fun onDestroy() {
+         overlay?.detach()
+         settingsJob?.cancel()
++        statusJob?.cancel()
++        accessibilityJob?.cancel()
+         scope.cancel()
+         AssistantRuntime.shutdown()
+         super.onDestroy()
+@@ -196,7 +241,8 @@ class AssistantService : LifecycleService() {
+ 
+     /** "Pause this chat" list backed by settings storage. */
+     private class DataStoreConversationPauses(
+-        private val container: com.liveaireply.app.di.AppContainer
++        private val container: com.liveaireply.app.di.AppContainer,
++        private val persistScope: CoroutineScope
+     ) : ConversationPauseController {
+         override fun isPaused(conversationId: String) =
+             container.currentSettings.isConversationPaused(conversationId)
+@@ -210,7 +256,9 @@ class AssistantService : LifecycleService() {
+         private fun mutate(transform: (List<String>) -> List<String>) {
+             val next = transform(container.currentSettings.pausedConversations).distinct()
+             container.currentSettings = container.currentSettings.copy(pausedConversations = next)
+-            kotlinx.coroutines.runBlocking {
++            // Persist asynchronously: runBlocking here used to block the caller's thread
++            // (including the UI thread from overlay actions) on disk I/O.
++            persistScope.launch {
+                 container.settingsRepository.update { it.copy(pausedConversations = next) }
+             }
+         }
+diff --git a/app/src/main/java/com/liveaireply/app/notifications/MonitoringNotifier.kt b/app/src/main/java/com/liveaireply/app/notifications/MonitoringNotifier.kt
+index 1e7f767..2de4e05 100644
+--- a/app/src/main/java/com/liveaireply/app/notifications/MonitoringNotifier.kt
++++ b/app/src/main/java/com/liveaireply/app/notifications/MonitoringNotifier.kt
+@@ -36,11 +36,34 @@ class MonitoringNotifier(private val context: Context) {
+         manager.createNotificationChannel(channel)
+     }
+ 
+-    fun build(title: String, status: String): Notification =
+-        baseBuilder(title, status)
+-            .addAction(0, context.getString(R.string.action_pause), assistantIntent(AssistantService.ACTION_PAUSE))
++    fun build(title: String, status: String, paused: Boolean = false): Notification {
++        val builder = baseBuilder(title, status)
++        if (paused) {
++            builder.addAction(0, context.getString(R.string.action_resume), assistantIntent(AssistantService.ACTION_RESUME))
++        } else {
++            builder.addAction(0, context.getString(R.string.action_pause), assistantIntent(AssistantService.ACTION_PAUSE))
++        }
++        return builder
+             .addAction(0, context.getString(R.string.action_stop), assistantIntent(AssistantService.ACTION_STOP))
+             .build()
++    }
++
++    /**
++     * A one-shot, dismissible heads-up used when Android blocks a background start of
++     * the monitoring service. Tapping it opens the app so monitoring can resume.
++     */
++    fun notifyActionNeeded(title: String, status: String) {
++        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
++            .setSmallIcon(R.drawable.ic_ai_dot)
++            .setContentTitle(title)
++            .setContentText(status)
++            .setStyle(NotificationCompat.BigTextStyle().bigText(status))
++            .setAutoCancel(true)
++            .setCategory(NotificationCompat.CATEGORY_REMINDER)
++            .setContentIntent(openAppIntent())
++            .build()
++        manager.notify(ACTION_NEEDED_NOTIFICATION_ID, notification)
++    }
+ 
+     /** The OCR notification stops only the explicitly authorized capture session. */
+     fun buildCapture(title: String, status: String): Notification =
+@@ -48,8 +71,8 @@ class MonitoringNotifier(private val context: Context) {
+             .addAction(0, context.getString(R.string.action_stop), captureIntent())
+             .build()
+ 
+-    fun update(title: String, status: String) {
+-        manager.notify(NOTIFICATION_ID, build(title, status))
++    fun update(title: String, status: String, paused: Boolean = false) {
++        manager.notify(NOTIFICATION_ID, build(title, status, paused))
+     }
+ 
+     private fun baseBuilder(title: String, status: String) =
+@@ -88,5 +111,6 @@ class MonitoringNotifier(private val context: Context) {
+     companion object {
+         const val CHANNEL_ID = "live_ai_reply_monitoring"
+         const val NOTIFICATION_ID = 1001
++        const val ACTION_NEEDED_NOTIFICATION_ID = 1002
+     }
+ }
+diff --git a/app/src/main/java/com/liveaireply/app/overlay/OverlayContent.kt b/app/src/main/java/com/liveaireply/app/overlay/OverlayContent.kt
+index dacc86f..66c24d2 100644
+--- a/app/src/main/java/com/liveaireply/app/overlay/OverlayContent.kt
++++ b/app/src/main/java/com/liveaireply/app/overlay/OverlayContent.kt
+@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.heightIn
+ import androidx.compose.foundation.layout.offset
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+@@ -41,6 +42,7 @@ import com.liveaireply.app.engine.OverlayAction
+ import com.liveaireply.app.engine.OverlayState
+ import com.liveaireply.app.ui.theme.LiveReplyTheme
+ import kotlin.math.roundToInt
++import kotlinx.coroutines.launch
+ 
+ /**
+  * The floating control. Collapsed it is a status dot; expanded it is the suggestion card
+@@ -125,7 +127,11 @@ private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
+         Column(
+             modifier = Modifier
+                 .padding(12.dp)
+-                .fillMaxWidth(),
++                .fillMaxWidth()
++                // The whole card scrolls so Send/Copy/STOP stay reachable when a long
++                // suggestion would otherwise push them off a small or landscape screen.
++                .heightIn(max = 560.dp)
++                .verticalScroll(rememberScrollState()),
+             verticalArrangement = Arrangement.spacedBy(6.dp)
+         ) {
+             Row(verticalAlignment = Alignment.CenterVertically) {
+@@ -168,6 +174,8 @@ private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
+                     Column(
+                         modifier = Modifier
+                             .fillMaxWidth()
++                            // Bounded height: nested inside the card's own verticalScroll.
++                            .heightIn(max = 220.dp)
+                             .verticalScroll(rememberScrollState())
+                     ) {
+                         Text(text = "\u201C${state.replyText}\u201D", fontSize = 13.sp)
+@@ -204,7 +212,11 @@ private fun ExpandedCard(state: OverlayState, scale: Float, alpha: Float) {
+ }
+ 
+ private fun act(action: OverlayAction, edited: String? = null) {
+-    AssistantRuntime.engine?.handleAction(action, edited?.takeIf { it.isNotBlank() })
++    // handleAction may block (network round trip for REGENERATE, typing simulation for
++    // SEND, disk write for PAUSE_CHAT) - never run it on the main thread.
++    val engine = AssistantRuntime.engine ?: return
++    val text = edited?.takeIf { it.isNotBlank() }
++    AssistantRuntime.actionScope.launch { engine.handleAction(action, text) }
+ }
+ 
+ private fun statusColor(status: AssistantStatus): Color = when (status) {
+diff --git a/app/src/test/java/com/liveaireply/app/conversation/ConversationDetectorTest.kt b/app/src/test/java/com/liveaireply/app/conversation/ConversationDetectorTest.kt
+index 3269a07..b4e11a1 100644
+--- a/app/src/test/java/com/liveaireply/app/conversation/ConversationDetectorTest.kt
++++ b/app/src/test/java/com/liveaireply/app/conversation/ConversationDetectorTest.kt
+@@ -245,6 +245,28 @@ class ConversationDetectorTest {
+         assertTrue(first.contains("Hellen"))
+     }
+ 
++    @Test
++    fun titleFlickerDoesNotDropTheMessageThatArrivedDuringTheFlip() {
++        openChat()
++        // The chat title is momentarily unreadable, which flips the title-based
++        // conversation id even though it is the same chat. The new message must still
++        // be delivered instead of being swallowed by a conversation re-seed.
++        val result = detector.process(
++            snapshot(turn("Are you coming tomorrow?", TurnDirection.INCOMING), screenLabel = null)
++        )
++        assertTrue("title flicker must not drop the message, got $result", result is DetectionOutcome.NewIncoming)
++    }
++
++    @Test
++    fun switchingToADifferentChatStillReseeds() {
++        openChat()
++        val switched = detector.process(
++            snapshot(turn("Hey", TurnDirection.INCOMING), screenLabel = "Someone Else")
++        )
++        assertTrue(switched is DetectionOutcome.Ignored)
++        assertEquals(IgnoreReason.CONVERSATION_CHANGED, (switched as DetectionOutcome.Ignored).reason)
++    }
++
+     @Test
+     fun incomingBubblesAreRecognisedFromRealNodeTrees() {
+         val extractor = BubbleExtractor()
+-- 
+2.39.5
+
